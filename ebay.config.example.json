@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy this file to 'ebay.config.json' and fill in your eBay keys. See EBAY_SETUP.md. Never share ebay.config.json - it contains your secret.",
+  "environment": "sandbox",
+  "clientId": "YOUR-EBAY-APP-ID-CLIENT-ID",
+  "clientSecret": "YOUR-EBAY-CERT-ID-CLIENT-SECRET",
+  "marketplaceId": "EBAY_US",
+  "_redirectUri_comment": "Only needed for Phase 2 (real publishing): your RuName from the eBay developer portal (User tokens (OAuth) -> Get a Token -> RuName). Leave as-is if you only want live appraisals.",
+  "redirectUri": "YOUR-RUNAME-FOR-SELLER-OAUTH"
+}

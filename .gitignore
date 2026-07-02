@@ -1,0 +1,8 @@
+# Secrets & local state — NEVER publish these
+ebay.config.json
+ebay.tokens.json
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini

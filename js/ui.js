@@ -150,20 +150,24 @@
   }
   function confirmDialog(title, message, confirmLabel, kind) {
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
       modal({
         title,
         body: el("div", { text: message }),
         actions: [
-          { label: "Cancel", onClick: (c) => { c(); resolve(false); } },
-          { label: confirmLabel || "Confirm", kind: kind || "primary", onClick: (c) => { c(); resolve(true); } },
+          { label: "Cancel", onClick: (c) => { finish(false); c(); } },
+          { label: confirmLabel || "Confirm", kind: kind || "primary", onClick: (c) => { finish(true); c(); } },
         ],
-        onClose: () => resolve(false),
+        onClose: () => finish(false),
       });
     });
   }
   function prompt2(title, fields, submitLabel) {
     // fields: [{name, label, value, type, placeholder}] -> resolves {name: value} or null
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
       const inputs = {};
       const body = el(".stack", fields.map((f) => {
         const input = el(f.type === "textarea" ? "textarea" : "input", {
@@ -176,13 +180,13 @@
       modal({
         title, body,
         actions: [
-          { label: "Cancel", onClick: (c) => { c(); resolve(null); } },
+          { label: "Cancel", onClick: (c) => { finish(null); c(); } },
           { label: submitLabel || "Save", kind: "primary", onClick: (c) => {
             const out = {}; for (const k in inputs) out[k] = inputs[k].value.trim();
-            c(); resolve(out);
+            finish(out); c();
           } },
         ],
-        onClose: () => resolve(null),
+        onClose: () => finish(null),
       });
     });
   }

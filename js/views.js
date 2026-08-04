@@ -378,7 +378,11 @@
       if (post && !targets.length) { toast("No marketplace selected", "Enable a connected marketplace, or save as draft.", "warn"); return; }
 
       const listings = {};
-      store.MARKETS.forEach((m) => { listings[m] = targets.includes(m) ? { status: "pending", message: "Queued…", listedAt: Date.now() } : { status: "skipped", message: "Not targeted" }; });
+      store.MARKETS.forEach((m) => {
+        if (!targets.includes(m)) listings[m] = { status: "skipped", message: "Not targeted" };
+        else if (post) listings[m] = { status: "pending", message: "Queued…", listedAt: Date.now() };
+        else listings[m] = { status: "draft", message: "Draft - not posted", listedAt: Date.now() };
+      });
       const product = store.addProduct({
         title, brand: brandIn.value.trim(), category: catSel.value, condition: condSel.value,
         size: sizeIn.value.trim(), color: colorIn.value.trim(), description: descIn.value.trim(),

@@ -1,16 +1,21 @@
 /* ===========================================================================
-   views.js — all screen renderers + shared components
-   Attaches to window.App.views (each fn returns a DOM node)
+   views.js — New Listing, Appraise, Marketplaces and Accounts screens, plus the
+   shared publish / handoff components. The Dashboard (inventory, sales,
+   take-downs, bulk actions) lives in inventory.js; Settings in settings.js.
+   Attaches to window.App.views (shared helpers on App.views._)
    =========================================================================== */
 (function () {
   window.App = window.App || {};
-  const { el, money, fmtDate, timeAgo, toast, modal, confirmDialog, prompt2, fileToDataURL, resizeImage } = App.ui;
+  const { el, money, moneyAuto, timeAgo, toast, modal, confirmDialog, prompt2, fileToDataURL, resizeImage } = App.ui;
   const store = App.store;
   const connectors = App.connectors;
+  const fees = App.fees;
 
   const CATEGORIES = ["Clothing", "Shoes", "Accessories", "Bags", "Electronics", "Home", "Toys & Games", "Books", "Beauty", "Other"];
   const CONDITIONS = ["New", "Like new", "Good", "Fair", "Poor"];
-  const CURRENCIES = ["USD", "EUR", "GBP"];
+  const CURRENCIES = ["EUR", "GBP", "USD"];
+  // Listing states that can't be re-pushed.
+  const CLOSED = ["skipped", "sold", "needs_delist", "delisted"];
 
   function go(route) { location.hash = route; }
   function selectEl(options, value) {
@@ -21,22 +26,27 @@
   function iconFor(cat) {
     return ({ Clothing: "🧥", Shoes: "👟", Accessories: "⌚", Bags: "👜", Electronics: "🎧", Home: "🏠", "Toys & Games": "🎮", Books: "📚", Beauty: "💄" }[cat]) || "📦";
   }
-  function statusLabel(s) { return ({ live: "Live", ready: "Ready to post", pending: "Pending", error: "Failed", skipped: "Not posted", draft: "Draft" }[s]) || s; }
-  function statusColorVar(s) { return ({ live: "var(--success)", ready: "#4dabf7", pending: "var(--warn)", error: "var(--danger)" }[s]) || "var(--muted)"; }
+  const LABELS = { live: "Live", ready: "Ready to post", pending: "Pending", error: "Failed", skipped: "Not posted", draft: "Draft", sold: "Sold", needs_delist: "Take down!", delisted: "Taken down" };
+  const COLORS = { live: "var(--success)", ready: "#4dabf7", pending: "var(--warn)", error: "var(--danger)", sold: "var(--success)", needs_delist: "var(--danger)" };
+  function statusLabel(s) { return LABELS[s] || s; }
+  function statusColorVar(s) { return COLORS[s] || "var(--muted)"; }
+  function signed(n, cur) { return (n >= 0 ? "+" : "") + moneyAuto(n, cur); }
 
   /* ---------- shared: marketplace status chip ---------- */
   function statusChip(marketId, lst, product) {
     const c = connectors.byId(marketId);
     const s = (lst && lst.status) || "skipped";
-    const clickable = product && s === "ready" && connectors.byId(marketId).handoff;
-    return el("span.chip", {
-      title: clickable ? ("Tap to post on " + c.label) : ((lst && lst.message) || statusLabel(s)),
-      style: clickable ? { cursor: "pointer" } : null,
-      onClick: clickable ? () => openHandoff(product, marketId) : null,
+    let action = null, text = statusLabel(s), title = (lst && lst.message) || statusLabel(s);
+    if (product && s === "ready" && c.handoff) { action = () => openHandoff(product, marketId); text = "Post now ↗"; title = "Tap to post on " + c.label; }
+    else if (product && s === "needs_delist") { action = () => App.inventory.openDelist(product, marketId); text = "Take down ↗"; title = "Sold elsewhere — take this listing down"; }
+    return el("span.chip" + (s === "needs_delist" ? ".chip-alert" : ""), {
+      title,
+      style: action ? { cursor: "pointer" } : null,
+      onClick: action ? (e) => { e.stopPropagation(); action(); } : null,
     }, [
       el("span.mkt-dot", { style: { background: c.color } }),
       el("span", { style: { fontWeight: "600" } }, c.label),
-      el("span.small", { style: { color: statusColorVar(s) } }, clickable ? "Post now ↗" : statusLabel(s)),
+      el("span.small", { style: { color: statusColorVar(s) } }, text),
     ]);
   }
 
@@ -74,12 +84,24 @@
           right.appendChild(el("span.badge.warn", "Pending"));
           api.setMsg(res.message || "Pending");
         } else if (res.status === "ready") {
-          right.appendChild(el("button.btn.sm.primary", { onClick: () => openHandoff(product, market) }, "Post on " + connectors.byId(market).label + " ↗"));
+          right.appendChild(el("button.btn.sm.primary", { onClick: () => openHandoff(product, market) }, "Post on " + c.label + " ↗"));
           api.setMsg(res.message || "Ready to post");
+        } else if (res.status === "sold") {
+          right.appendChild(el("span.badge.ok", "✓ Sold"));
+          api.setMsg("Sold here");
+        } else if (res.status === "needs_delist") {
+          right.appendChild(el("button.btn.sm.danger", { onClick: () => App.inventory.openDelist(product, market) }, "Take down ↗"));
+          api.setMsg(res.message || "Sold elsewhere - take this down");
+        } else if (res.status === "delisted") {
+          right.appendChild(el("span.badge", "Taken down"));
+          api.setMsg(res.message || "Taken down");
         } else if (res.status === "error") {
           right.appendChild(el("button.btn.sm", { onClick: () => repost("↻ Retrying…") }, "↻ Retry"));
           api.setMsg(res.message || "Failed");
           right.insertBefore(el("span.badge.err", "Failed"), right.firstChild);
+        } else if (product.sale) {
+          right.appendChild(el("span.badge", "—"));
+          api.setMsg(res.message || statusLabel(res.status));
         } else {
           right.appendChild(el("button.btn.sm", { onClick: () => repost("Posting…") }, "Post"));
           api.setMsg(statusLabel(res.status));
@@ -121,13 +143,15 @@
   }
 
   async function republish(p) {
-    let targets = store.MARKETS.filter((m) => p.listings[m] && p.listings[m].status !== "skipped");
+    if (p.sale) { toast("Already sold", "Undo the sale first if you want to list it again.", "warn"); return; }
+    let targets = store.MARKETS.filter((m) => p.listings[m] && CLOSED.indexOf(p.listings[m].status) === -1);
     if (!targets.length) { toast("Nothing to re-push", "This item isn't targeting any marketplace.", "warn"); return; }
     if (targets.indexOf("ebay") !== -1) {
       const ok = await ensureEbayReady(p);
       if (!ok) { store.setListing(p.id, "ebay", { status: "skipped", message: "Skipped - item specifics not provided" }); targets = targets.filter((m) => m !== "ebay"); }
     }
     if (!targets.length) { App.app.rerender(); return; }
+    store.updateProduct(p.id, { refreshedAt: Date.now() }); // a relist restarts the "stale" clock
     const { node, promise } = runPublishUI(p, targets);
     modal({ title: "Re-pushing " + p.title, body: node, actions: [{ label: "Done", kind: "primary", onClick: (c) => { c(); App.app.rerender(); } }] });
     promise.then((r) => summarize(r, "Re-push"));
@@ -184,43 +208,7 @@
     });
   }
 
-  /* ---------- shared: listing card + detail ---------- */
-  function listingCard(p) {
-    const thumb = el(".listing-thumb");
-    if (p.photos && p.photos[0]) thumb.style.backgroundImage = "url(" + p.photos[0] + ")";
-    else thumb.appendChild(el(".ph", iconFor(p.category)));
-    thumb.appendChild(el(".listing-price", money(p.price, p.currency)));
-    return el(".listing-card", [
-      thumb,
-      el(".listing-body", [
-        el(".listing-title", p.title),
-        el(".listing-sub", [p.brand, p.condition, p.size].filter(Boolean).join(" · ") || "—"),
-        el(".listing-chips", store.MARKETS.map((m) => statusChip(m, p.listings && p.listings[m], p))),
-        el(".listing-acts", [
-          el("button.btn.sm.ghost", { onClick: () => openListingDetail(p) }, "Details"),
-          el("button.btn.sm.ghost", { onClick: () => republish(p) }, "↻ Re-push"),
-          el("button.btn.sm.ghost", { style: { marginLeft: "auto" }, onClick: async () => {
-            if (await confirmDialog("Delete listing?", "“" + p.title + "” will be removed.", "Delete", "danger")) { store.removeProduct(p.id); App.app.rerender(); }
-          } }, "🗑"),
-        ]),
-      ]),
-    ]);
-  }
-
-  function openListingDetail(p) {
-    const rows = store.MARKETS.map((m) => { const api = pubRow(m, p); api.setResult((p.listings && p.listings[m]) || { status: "draft" }); return api.node; });
-    const body = el(".stack", [
-      (p.photos && p.photos.length) ? el(".photo-grid", p.photos.map((src) => el(".photo-tile", { style: { backgroundImage: "url(" + src + ")" } }))) : null,
-      el("div", [el("div", { style: { fontWeight: "700", fontSize: "16px" } }, p.title), el(".small.muted", [p.brand, p.condition, p.size, p.color].filter(Boolean).join(" · ") || "—")]),
-      el(".row.between", [el("div", { style: { fontWeight: "750", fontSize: "20px" } }, money(p.price, p.currency)), el(".small.muted", "Created " + fmtDate(p.createdAt))]),
-      p.description ? el(".small.muted", p.description) : null,
-      el("div", { style: { fontWeight: "650", marginTop: "4px" } }, "Marketplace status"),
-      el(".stack", rows),
-    ]);
-    modal({ title: "Listing details", body, actions: [{ label: "Close" }], onClose: () => App.app.rerender() });
-  }
-
-  /* ---------- Vinted: one-tap manual handoff (no automation) ---------- */
+  /* ---------- Handoff marketplaces: one-tap manual posting (no automation) ---------- */
   function copyText(text, ev) {
     const flash = () => { if (ev && ev.target) { const b = ev.target; const old = b.textContent; b.textContent = "Copied!"; setTimeout(() => { b.textContent = old; }, 1200); } };
     if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash)); }
@@ -235,7 +223,7 @@
   function openHandoff(product, marketId) {
     const c = connectors.byId(marketId);
     const fields = [
-      ["Title", product.title], ["Price", App.ui.money(product.price, product.currency)],
+      ["Title", product.title], ["Price", moneyAuto(product.price, product.currency || fees.currency())],
       ["Brand", product.brand], ["Size", product.size], ["Color", product.color],
       ["Condition", product.condition], ["Description", product.description],
     ].filter((f) => f[1]);
@@ -244,7 +232,7 @@
     const body = el(".stack", [
       el(".note.info", [el("span.ni", "ℹ️"), el("span", [el("strong", c.label + " has no public API"), ", so OmniList won't auto-post it (that breaks their rules). Open " + c.label + ", drop in these details + photos, and tap post."])]),
       c.sellNote ? el(".small.muted", c.sellNote) : null,
-      el("button.btn.primary.block", { onClick: () => window.open(c.sellUrl || "#", "_blank", "noopener") }, "Open " + c.label + " new listing ↗"),
+      el("button.btn.primary.block", { onClick: () => window.open(connectors.linkFor(marketId, "sell"), "_blank", "noopener") }, "Open " + c.label + " new listing ↗"),
       photos.length ? el("div", [
         el(".small.muted", { style: { margin: "6px 0 6px" } }, "Photos — download, then upload to " + c.label),
         el(".photo-grid", photos.map((src, i) => el(".photo-tile", { style: { backgroundImage: "url(" + src + ")" } },
@@ -262,63 +250,15 @@
       actions: [
         { label: "Mark as posted", onClick: async (close) => {
           close();
-          const r = await prompt2("Mark " + c.label + " as posted", [{ name: "url", label: c.label + " listing URL (optional)", placeholder: "https://..." }], "Save");
-          store.setListing(product.id, marketId, { status: "live", message: "Posted manually on " + c.label, url: (r && r.url) || (c.sellUrl || "#"), listedAt: Date.now() });
+          const r = await prompt2("Mark " + c.label + " as posted", [{ name: "url", label: c.label + " listing URL (optional — makes taking it down later one tap)", placeholder: "https://..." }], "Save");
+          if (!r) return;
+          store.setListing(product.id, marketId, { status: "live", message: "Posted manually on " + c.label, url: r.url || null, listedAt: Date.now() });
           App.app.rerender();
           toast("Marked as posted", c.label + " listing set to live.", "ok");
         } },
         { label: "Close" },
       ],
     });
-  }
-
-  /* ============================ DASHBOARD ============================ */
-  function statCard(icon, label, value, delta) {
-    return el(".stat", [el(".label", [el("span", icon), label]), el(".value", String(value)), delta ? el(".delta", delta) : null]);
-  }
-  function dashboard() {
-    const root = el(".view");
-    const account = store.activeAccount();
-    const ps = store.products();
-    const livePlacements = ps.reduce((n, p) => n + store.MARKETS.filter((m) => p.listings[m] && p.listings[m].status === "live").length, 0);
-    const connected = store.MARKETS.filter((m) => account.connections[m].connected).length;
-    const invValue = ps.reduce((n, p) => n + (Number(p.price) || 0), 0);
-    const aprs = store.appraisals();
-
-    root.appendChild(el(".page-head", [
-      el("div", [el("h2", "Dashboard"), el("p", account.name + " · list once, sell everywhere")]),
-      el("button.btn.primary", { onClick: () => go("#/new") }, "＋ New listing"),
-    ]));
-    root.appendChild(el(".grid.cols-4", [
-      statCard("📦", "Active listings", ps.length),
-      statCard("🟢", "Live placements", livePlacements, "across " + connected + " marketplace" + (connected === 1 ? "" : "s")),
-      statCard("🔗", "Connected", connected + "/" + store.MARKETS.length, "marketplaces"),
-      statCard("💰", "Inventory value", money(invValue)),
-    ]));
-
-    root.appendChild(el(".page-head", { style: { marginTop: "26px", marginBottom: "12px" } }, [
-      el("h3", { style: { margin: "0" } }, "Your listings"),
-      ps.length ? el("span.small.muted", ps.length + " item" + (ps.length === 1 ? "" : "s")) : null,
-    ]));
-    if (!ps.length) {
-      root.appendChild(el(".card", el(".empty", [
-        el(".big", "🪄"),
-        el("h3", "No listings yet"),
-        el("p", "Upload a product once and push it to every connected marketplace at the same time."),
-        el("button.btn.primary", { style: { marginTop: "12px" }, onClick: () => go("#/new") }, "Create your first listing"),
-      ])));
-    } else {
-      root.appendChild(el(".grid.cols-3", ps.map((p) => listingCard(p))));
-    }
-
-    if (aprs.length) {
-      root.appendChild(el("h3", { style: { margin: "26px 0 12px" } }, "Recent appraisals"));
-      root.appendChild(el(".card", { style: { padding: "4px 0" } }, aprs.slice(0, 5).map((a) => el(".comp", [
-        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt))]),
-        el("div.c-price", money(a.result.aggregate.median, a.result.currency)),
-      ]))));
-    }
-    return root;
   }
 
   /* ============================ NEW LISTING ============================ */
@@ -334,8 +274,9 @@
     const condSel = selectEl(CONDITIONS, draft.condition || "Good");
     const sizeIn = el("input", { type: "text", value: draft.size || "", placeholder: "e.g., US 10 / M" });
     const colorIn = el("input", { type: "text", value: draft.color || "", placeholder: "e.g., White" });
-    const priceIn = el("input", { type: "number", value: draft.price || "", placeholder: "0", min: "0", step: "1" });
-    const curSel = selectEl(CURRENCIES, draft.currency || "USD");
+    const priceIn = el("input", { type: "number", value: draft.price || "", placeholder: "0", min: "0", step: "0.01" });
+    const curSel = selectEl(CURRENCIES, draft.currency || fees.currency());
+    const costIn = el("input", { type: "number", value: draft.cost != null ? draft.cost : "", placeholder: "What you paid", min: "0", step: "0.01" });
     const descIn = el("textarea", { placeholder: "Condition details, measurements, flaws…" });
     descIn.value = draft.description || "";
 
@@ -358,7 +299,7 @@
       const c = connectors.byId(m);
       const conn = account.connections[m];
       targetState[m] = !!conn.connected;
-      const check = el("input", { type: "checkbox", checked: !!conn.connected, disabled: !conn.connected, onchange: (e) => { targetState[m] = e.target.checked; } });
+      const check = el("input", { type: "checkbox", checked: !!conn.connected, disabled: !conn.connected, onchange: (e) => { targetState[m] = e.target.checked; drawNet(); } });
       return el(".mkt-target" + (conn.connected ? "" : ".disabled"), [
         el(".mkt-logo", { style: { background: c.color } }, c.short),
         el(".grow", [
@@ -368,6 +309,32 @@
         conn.connected ? el("label.switch", [check, el("span.slider")]) : el("a.btn.sm", { href: "#/marketplaces" }, "Connect"),
       ]);
     });
+
+    // "What you'd keep" — net after each marketplace's fee, before you publish.
+    const netBox = el(".net-preview");
+    function drawNet() {
+      App.ui.clear(netBox);
+      const price = Number(priceIn.value);
+      const cost = costIn.value.trim() === "" ? null : Number(costIn.value);
+      const cur = curSel.value;
+      const ms = store.MARKETS.filter((m) => targetState[m] && account.connections[m].connected);
+      if (!(price > 0) || !ms.length) { netBox.appendChild(el(".small.muted", "Enter a price to see what you'd keep on each marketplace after fees.")); return; }
+      netBox.appendChild(el(".small.muted", "What you'd keep (" + fees.region() + " fees — edit in Settings)"));
+      ms.forEach((m) => {
+        const c = connectors.byId(m);
+        const r = fees.calc(m, price, { cost });
+        netBox.appendChild(el(".net-row", [
+          el("span.mkt-dot", { style: { background: c.color } }),
+          el("span.grow", c.label),
+          el("span.small.muted", "fee " + moneyAuto(r.fee, cur)),
+          el("strong", moneyAuto(r.net, cur)),
+          r.profit != null ? el("span.small", { style: { color: r.profit >= 0 ? "var(--success)" : "var(--danger)", minWidth: "56px", textAlign: "right" } }, signed(r.profit, cur)) : null,
+        ]));
+      });
+    }
+    [priceIn, costIn].forEach((i) => i.addEventListener("input", drawNet));
+    curSel.addEventListener("change", drawNet);
+    drawNet();
 
     async function submit(post) {
       const title = titleIn.value.trim();
@@ -386,7 +353,8 @@
       const product = store.addProduct({
         title, brand: brandIn.value.trim(), category: catSel.value, condition: condSel.value,
         size: sizeIn.value.trim(), color: colorIn.value.trim(), description: descIn.value.trim(),
-        price, currency: curSel.value, photos: photos.slice(), listings,
+        price, currency: curSel.value, cost: costIn.value.trim() === "" ? null : Number(costIn.value),
+        photos: photos.slice(), listings,
       });
       if (!post) { toast("Saved as draft", "Listing saved without posting.", "ok"); go("#/"); return; }
 
@@ -423,8 +391,9 @@
           ]),
           el(".form-grid", { style: { marginTop: "12px" } }, [
             el("label.field", [el("span.lab", "Color"), colorIn]),
-            el("label.field", [el("span.lab", "Price"), el(".row", { style: { gap: "8px" } }, [priceIn, curSel])]),
+            el("label.field", [el("span.lab", "Price *"), el(".row", { style: { gap: "8px" } }, [priceIn, curSel])]),
           ]),
+          el("label.field", { style: { marginTop: "12px" } }, [el("span.lab", "Cost — what you paid (for profit tracking)"), costIn]),
           el("label.field", { style: { marginTop: "12px" } }, [el("span.lab", "Description"), descIn]),
         ]),
       ]),
@@ -434,6 +403,7 @@
           el(".stack", targetRows),
           el(".note.warn", { style: { marginTop: "12px" } }, [el("span.ni", "⚠️"), el("span", "eBay posts via the official API. The others have no public API, so OmniList prepares ready-to-post listings you finish in one tap — no automation.")]),
         ]),
+        el(".card", [el("div", { style: { fontWeight: "650", marginBottom: "10px" } }, "Your take"), netBox]),
         el(".card", [
           el("button.btn.primary.lg.block", { onClick: () => submit(true) }, "🚀 Publish to selected"),
           el("button.btn.ghost.block", { style: { marginTop: "10px" }, onClick: () => submit(false) }, "Save as draft"),
@@ -460,7 +430,7 @@
       stage.appendChild(el(".cam-empty", [
         el("div", { style: { fontSize: "34px" } }, "📷"),
         el("div", "Point your camera at the item, or upload a photo"),
-        el("div.small.muted", "Camera needs a secure origin — run serve.ps1 (localhost)."),
+        el("div.small.muted", "The camera needs https (the live site) or localhost."),
       ]));
     }
     function showCaptured(src) { App.ui.clear(stage); stage.appendChild(el("img", { src })); }
@@ -474,7 +444,7 @@
         stage.appendChild(el(".scan-frame")); stage.appendChild(el(".scan-line"));
         setCamButtons("live");
       } catch (e) {
-        toast("Camera unavailable", e && e.name === "NotAllowedError" ? "Permission denied — use Upload." : "Use Upload, or run serve.ps1.", "warn");
+        toast("Camera unavailable", e && e.name === "NotAllowedError" ? "Permission denied — use Upload." : "Use Upload instead.", "warn");
         showEmpty(); setCamButtons("idle");
       }
     }
@@ -510,19 +480,21 @@
     const bIn = el("input", { type: "text", placeholder: "e.g., Nike" });
     const catSel = selectEl(CATEGORIES, "Shoes");
     const condSel = selectEl(CONDITIONS, "Good");
+    const shopIn = el("input", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 8 — leave blank to skip the Buy/Pass call" });
     const resultArea = el("div");
     const historyArea = el("div");
 
     function runAppraise() {
       const query = qIn.value.trim();
       if (!query) { toast("Add a description", "Tell the app what the item is.", "warn"); qIn.focus(); return; }
-      const input = { query, brand: bIn.value.trim(), category: catSel.value, condition: condSel.value };
+      const shopPrice = shopIn.value.trim() === "" ? null : Number(shopIn.value);
+      const input = { query, brand: bIn.value.trim(), category: catSel.value, condition: condSel.value, shopPrice };
       App.ui.clear(resultArea);
-      resultArea.appendChild(el(".card", el(".row", [el(".spinner"), el("div", [el("div", { style: { fontWeight: "600" } }, "Appraising…"), el(".small.muted", "Checking eBay sold, Depop, Vinted & Google Shopping")])])));
+      resultArea.appendChild(el(".card", el(".row", [el(".spinner"), el("div", [el("div", { style: { fontWeight: "600" } }, "Appraising…"), el(".small.muted", "Checking eBay, Depop, Vinted & Google Shopping")])])));
       App.appraisal.appraise(input).then((result) => {
         App.ui.clear(resultArea);
         resultArea.appendChild(renderAppraisalResult(input, result, captured));
-        store.addAppraisal({ query: input.query, brand: input.brand, category: input.category, condition: input.condition, image: captured, result });
+        store.addAppraisal({ query: input.query, brand: input.brand, category: input.category, condition: input.condition, shopPrice, image: captured, result });
         renderHistory();
       });
     }
@@ -534,32 +506,34 @@
       historyArea.appendChild(el("h3", { style: { margin: "20px 0 10px" } }, "Recent appraisals"));
       historyArea.appendChild(el(".card", { style: { padding: "4px 0" } }, aprs.slice(0, 8).map((a) => el(".comp", { style: { cursor: "pointer" }, onClick: () => {
         App.ui.clear(resultArea);
-        resultArea.appendChild(renderAppraisalResult({ query: a.query, brand: a.brand, category: a.category, condition: a.condition }, a.result, a.image));
+        resultArea.appendChild(renderAppraisalResult({ query: a.query, brand: a.brand, category: a.category, condition: a.condition, shopPrice: a.shopPrice == null ? null : a.shopPrice }, a.result, a.image));
         window.scrollTo({ top: 0, behavior: "smooth" });
       } }, [
         el(".photo-tile", { style: { width: "42px", height: "42px", flex: "none", backgroundImage: a.image ? "url(" + a.image + ")" : "none" } }),
-        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt))]),
+        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt) + (a.result.verdict ? " · " + a.result.verdict.call : ""))]),
         el("div.c-price", money(a.result.aggregate.median, a.result.currency)),
       ]))));
     }
 
-    root.appendChild(el(".page-head", [el("div", [el("h2", "Scan & appraise"), el("p", "Estimate an item's value from eBay, Depop, Vinted & Google before you list.")])]));
+    root.appendChild(el(".page-head", [el("div", [el("h2", "Scan & appraise"), el("p", "Know what an item is worth — and whether it's worth buying — before you list.")])]));
     const ebayStatusChip = el("div", { style: { marginBottom: "12px" } }, el("span.small.muted", "Checking eBay connection…"));
     App.backend.status().then((st) => {
       App.ui.clear(ebayStatusChip);
       if (st && st.ebay && st.ebay.configured) ebayStatusChip.appendChild(el("span.badge.ok", "🟢 eBay LIVE — " + st.ebay.environment + " (" + st.ebay.marketplace + ")"));
-      else if (st && st.offline) ebayStatusChip.appendChild(el("span.badge", "Backend offline — simulated mode. Launch via serve.ps1 for live eBay."));
-      else ebayStatusChip.appendChild(el("span.badge.auto", "eBay not configured — simulated. See EBAY_SETUP.md"));
+      else if (st && st.offline) ebayStatusChip.appendChild(el("span.badge", "Estimates mode — live eBay comps need the local server (start.bat)."));
+      else ebayStatusChip.appendChild(el("span.badge.auto", "eBay not configured — estimates. See EBAY_SETUP.md"));
     });
     root.appendChild(ebayStatusChip);
     root.appendChild(el(".grid.cols-2", [
       el(".card", [el("div", { style: { fontWeight: "650", marginBottom: "10px" } }, "1 · Capture the item"), stage, camBtns]),
       el(".card", [
         el("div", { style: { fontWeight: "650", marginBottom: "10px" } }, "2 · Describe it"),
-        el(".note.info", { style: { marginBottom: "12px" } }, [el("span.ni", "💡"), el("span", [el("strong", "Auto-identify: "), "plug a vision model (e.g., Claude) in here to read the photo and fill these in. For now, type what it is."])]),
         el("label.field", [el("span.lab", "What is it? *"), qIn]),
         el(".form-grid", { style: { marginTop: "12px" } }, [el("label.field", [el("span.lab", "Brand"), bIn]), el("label.field", [el("span.lab", "Category"), catSel])]),
-        el("label.field", { style: { marginTop: "12px" } }, [el("span.lab", "Condition"), condSel]),
+        el(".form-grid", { style: { marginTop: "12px" } }, [
+          el("label.field", [el("span.lab", "Condition"), condSel]),
+          el("label.field", [el("span.lab", "Shop price (" + fees.currency() + ")"), shopIn]),
+        ]),
         el("button.btn.primary.lg.block", { style: { marginTop: "16px" }, onClick: runAppraise }, "🔎 Appraise value"),
       ]),
     ]));
@@ -588,7 +562,7 @@
       ])));
       body.appendChild(el(".comp", { style: { background: "var(--bg-2)" } }, [
         el(".c-title", el("div.t", { style: { color: "var(--muted)" } }, src.label + " range")),
-        el("div.c-price", { style: { color: "var(--muted)" } }, money(src.stats.low) + " – " + money(src.stats.high)),
+        el("div.c-price", { style: { color: "var(--muted)" } }, money(src.stats.low, result.currency) + " – " + money(src.stats.high, result.currency)),
       ]));
     }
     draw();
@@ -600,19 +574,51 @@
     if (result.ebayLive) {
       return el(".note.info", [el("span.ni", "🟢"), el("span", [
         el("strong", "eBay is LIVE" + (result.environment ? " (" + result.environment + ")" : "") + ". "),
-        "Real active listings via the Browse API (current asking prices, not sold prices). Depop, Vinted & Google are simulated.",
+        "Real active listings via the Browse API (current asking prices, not sold prices). Depop, Vinted & Google are estimates.",
       ])]);
     }
     if (result.backendConfigured && result.ebayError) {
-      return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "eBay live request failed — "), "showing simulated eBay. ", el("span.muted", String(result.ebayError))])]);
+      return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "eBay live request failed — "), "showing estimated eBay. ", el("span.muted", String(result.ebayError))])]);
     }
-    return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "Simulated data. "), "Connect eBay for live comps (see EBAY_SETUP.md). Depop/Vinted/Google have no public APIs."])]);
+    return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "Estimated data. "), "These comps are modelled, not scraped. Connect eBay locally for live comps (see EBAY_SETUP.md). Depop/Vinted/Google have no public APIs."])]);
+  }
+
+  function verdictCard(v, result) {
+    const cur = result.currency;
+    const kind = v.call === "BUY" ? "buy" : v.call === "MAYBE" ? "maybe" : "pass";
+    const label = v.call === "BUY" ? "✅ BUY" : v.call === "MAYBE" ? "🤔 MAYBE" : "⛔ PASS";
+    return el(".verdict.verdict-" + kind, [
+      el(".verdict-call", label),
+      el(".verdict-score", [el("span.big", String(v.score)), el("span.small.muted", "/100 resale score")]),
+      el("ul.verdict-reasons", [
+        el("li", "Best on " + v.bestLabel + ": " + signed(v.profit, cur) + " after fees vs. " + moneyAuto(v.cost, cur) + " paid"),
+        el("li", "Return on cost: " + (v.roi == null ? "free find" : Math.round(v.roi * 100) + "%")),
+        el("li", "Price confidence: " + result.aggregate.confidence + "%"),
+      ]),
+      el(".small.muted.rule", "Rule: BUY when the best marketplace nets ≥ " + moneyAuto(v.min, cur) + " profit, ≥ 50% return and ≥ 50% confidence. MAYBE if it's still profitable. Otherwise PASS. Estimates aren't guarantees."),
+    ]);
+  }
+
+  function recCard(pm, input, result) {
+    const cur = result.currency;
+    const m = pm.net != null ? pm : Object.assign({}, pm, fees.calc(pm.id, pm.price, { cost: input.shopPrice })); // older saved appraisals
+    const best = result.verdict && result.verdict.best === pm.id;
+    return el(".rec-card" + (best ? ".rec-best" : ""), [
+      el(".row", [el("span.mkt-dot", { style: { background: pm.color } }), el("strong", pm.label), best ? el("span.badge.ok", { style: { marginLeft: "auto" } }, "Best") : null]),
+      el(".price", { style: { margin: "6px 0 4px" } }, money(pm.price, cur)),
+      el(".rec-line", [el("span", "Fees"), el("span", "−" + moneyAuto(m.fee, cur))]),
+      el(".rec-line", [el("span", "You keep"), el("strong", moneyAuto(m.net, cur))]),
+      m.profit != null ? el(".rec-line", [el("span", "Profit"), el("strong", { style: { color: m.profit >= 0 ? "var(--success)" : "var(--danger)" } }, signed(m.profit, cur))]) : null,
+      el(".small.muted", { style: { marginTop: "6px" } }, pm.rationale),
+    ]);
   }
 
   function renderAppraisalResult(input, result, image) {
     const a = result.aggregate;
     return el(".stack", [
       appraisalBanner(result),
+      result.verdict ? verdictCard(result.verdict, result)
+        : el(".note.info", [el("span.ni", "💡"), el("span", [el("strong", "Want a Buy / Pass call? "), "Enter the shop price and appraise again — you'll get the profit on each marketplace and a 1–100 resale score."])]),
       el(".card.pad-lg", [
         image ? el(".row", { style: { gap: "16px", alignItems: "center" } }, [
           el(".photo-tile", { style: { width: "84px", height: "84px", flex: "none", backgroundImage: "url(" + image + ")" } }),
@@ -625,28 +631,25 @@
         el(".row", { style: { marginTop: "16px", justifyContent: "center" } }, el("button.btn.primary", { onClick: () => createListingFromAppraisal(input, result, image) }, "＋ Create listing from this")),
       ]),
       el("div", [
-        el("h3", { style: { margin: "4px 0 10px" } }, "Suggested price per marketplace"),
-        el(".grid.cols-3", result.perMarketplace.map((pm) => el(".rec-card", [
-          el(".row", [el("span.mkt-dot", { style: { background: pm.color } }), el("strong", pm.label)]),
-          el(".price", { style: { margin: "6px 0" } }, money(pm.price, result.currency)),
-          el(".small.muted", pm.rationale),
-          el(".small.muted", { style: { marginTop: "6px", opacity: "0.8" } }, "Fees: " + pm.feeNote),
-        ]))),
+        el("h3", { style: { margin: "4px 0 10px" } }, "What you'd make on each marketplace"),
+        el(".grid.cols-3", result.perMarketplace.map((pm) => recCard(pm, input, result))),
       ]),
       el("div", [el("h3", { style: { margin: "4px 0 10px" } }, "Comparable listings"), renderComps(result)]),
     ]);
   }
   function valueHero(a, result) {
+    const cur = result.currency;
     return el(".value-hero", { style: { flex: "1" } }, [
-      el(".est", money(a.median, result.currency)),
-      el(".range", "Typical range " + money(a.low) + " – " + money(a.high) + "  ·  Quick-sale " + money(a.quickSale)),
+      el(".est", money(a.median, cur)),
+      el(".range", "Typical range " + money(a.low, cur) + " – " + money(a.high, cur) + "  ·  Quick-sale " + money(a.quickSale, cur)),
     ]);
   }
   function createListingFromAppraisal(input, result, image) {
     store.setDraft({
       title: App.ui.composeTitle(input.brand, input.query),
       brand: input.brand || "", category: input.category || "Clothing", condition: input.condition || "Good",
-      price: result.aggregate.median, currency: result.currency, photos: image ? [image] : [],
+      price: result.aggregate.median, currency: result.currency, cost: input.shopPrice == null ? null : input.shopPrice,
+      photos: image ? [image] : [],
     });
     go("#/new");
   }
@@ -750,6 +753,7 @@
         if (r) { store.setConnection(account.id, c.id, { connected: true, handle: (r.handle || "account").replace(/^@/, ""), since: Date.now() }); toast(c.label + " connected", "Linked to " + account.name, "ok"); App.app.rerender(); }
       } }, "Connect " + c.label));
     }
+    const f = fees.feeFor(c.id);
     return el(".card", [
       el(".row.between", [
         el(".row", [el(".mkt-logo", { style: { background: c.color, width: "40px", height: "40px" } }, c.short), el("div", [el("div", { style: { fontWeight: "700", fontSize: "16px" } }, c.label), el(".small.muted", c.audience)])]),
@@ -759,7 +763,7 @@
         ]),
       ]),
       el(".small.muted", { style: { marginTop: "12px" } }, c.apiNote),
-      el("div", { style: { marginTop: "10px" } }, el("span.badge", "💸 " + c.feeNote)),
+      el("div", { style: { marginTop: "10px" } }, el("span.badge", "💸 " + fees.region() + " fee used: " + f.pct + "%" + (f.fixed ? " + " + moneyAuto(f.fixed, fees.currency()) : "") + (f.overridden ? " (edited)" : ""))),
       actions,
       ebaySellerSection(c),
     ]);
@@ -768,7 +772,7 @@
     const root = el(".view");
     const account = store.activeAccount();
     root.appendChild(el(".page-head", [el("div", [el("h2", "Marketplaces"), el("p", "Connect " + account.name + "’s marketplace accounts. Each profile links independently.")])]));
-    root.appendChild(el(".note.info", { style: { marginBottom: "16px" } }, [el("span.ni", "ℹ️"), el("span", [el("strong", "Demo connections. "), "Toggling here simulates linking. Real linking uses OAuth (eBay); the rest are manual one-tap handoffs (no automation)."])]));
+    root.appendChild(el(".note.info", { style: { marginBottom: "16px" } }, [el("span.ni", "ℹ️"), el("span", [el("strong", "How linking works. "), "eBay connects through its official API (when running locally). The rest are one-tap handoffs — connecting just tells OmniList you sell there. Fees are editable in Settings."])]));
     root.appendChild(el(".grid.cols-3", connectors.list().map((c) => marketplaceCard(c, account))));
     return root;
   }
@@ -790,7 +794,7 @@
       el(".row.wrap", { style: { marginTop: "14px", gap: "8px" } }, [
         active ? el("span.badge.ok", "● Active") : el("button.btn.sm.primary", { onClick: () => App.app.switchAccount(a.id) }, "Switch to"),
         el("button.btn.sm.ghost", { onClick: async () => { const r = await prompt2("Rename account", [{ name: "name", label: "Account name", value: a.name }], "Save"); if (r && r.name) { store.renameAccount(a.id, r.name); App.app.renderChrome(); App.app.rerender(); } } }, "Rename"),
-        el("button.btn.sm.danger", { onClick: async () => { if (await confirmDialog("Delete " + a.name + "?", "This removes the profile and its " + prodCount + " listings (demo only).", "Delete", "danger")) { store.removeAccount(a.id); App.app.renderChrome(); App.app.rerender(); } } }, "Delete"),
+        el("button.btn.sm.danger", { onClick: async () => { if (await confirmDialog("Delete " + a.name + "?", "This removes the profile and its " + prodCount + " listings.", "Delete", "danger")) { store.removeAccount(a.id); App.app.renderChrome(); App.app.rerender(); } } }, "Delete"),
       ]),
     ]);
   }
@@ -810,5 +814,8 @@
     return root;
   }
 
-  window.App.views = { dashboard, newListing, appraise, marketplaces, accounts, cleanup: null };
+  window.App.views = {
+    newListing, appraise, marketplaces, accounts, cleanup: null,
+    _: { CATEGORIES, CONDITIONS, CURRENCIES, CLOSED, go, selectEl, iconFor, statusLabel, statusColorVar, signed, statusChip, publishOne, pubRow, runPublishUI, summarize, republish, ensureEbayReady, openHandoff },
+  };
 })();

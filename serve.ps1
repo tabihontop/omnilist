@@ -503,6 +503,7 @@ $mime = @{
   ".svg" = "image/svg+xml"; ".png" = "image/png"; ".jpg" = "image/jpeg"; ".jpeg" = "image/jpeg"
   ".gif" = "image/gif"; ".ico" = "image/x-icon"; ".woff2" = "font/woff2"
   ".txt" = "text/plain; charset=utf-8"; ".md" = "text/plain; charset=utf-8"
+  ".webmanifest" = "application/manifest+json; charset=utf-8"
 }
 function Handle-Static($req, $res) {
   $rel = [System.Uri]::UnescapeDataString($req.Url.AbsolutePath.TrimStart("/"))

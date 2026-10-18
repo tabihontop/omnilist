@@ -102,7 +102,7 @@
   async function appraise(input) {
     const started = Date.now();
     const sources = gather(input);
-    const out = { ebayLive: false, ebayError: null, backendConfigured: false, environment: null, currency: "USD" };
+    const out = { ebayLive: false, ebayError: null, backendConfigured: false, environment: null, currency: App.fees.currency() };
 
     await tryLiveEbay(input, sources, out);
 
@@ -127,7 +127,8 @@
       else if (c.id === "facebook") rationale = "Local buyers, no fees on pickup — price for a quick local sale.";
       else if (c.id === "sellpy") rationale = "Consignment (they sell for you) — expect less after commission.";
       else rationale = "Price near the median.";
-      return { id: c.id, label: c.label, color: c.color, price, rationale, feeNote: c.feeNote };
+      const money = App.fees.calc(c.id, price, { cost: input.shopPrice });
+      return { id: c.id, label: c.label, color: c.color, price, rationale, feeNote: c.feeNote, fee: money.fee, net: money.net, profit: money.profit };
     });
     const quickSale = Math.max(5, Math.round(med * 0.88));
 
@@ -140,8 +141,32 @@
       aggregate: { low, median: med, high, quickSale, confidence },
       sources,
       perMarketplace,
+      verdict: verdictFor(perMarketplace, confidence, input.shopPrice),
     };
   }
 
-  window.App.appraisal = { appraise, CONDITION_FACTOR };
+  /* ---------- Buy / Maybe / Pass ----------
+     BUY   when the best marketplace nets at least MIN_PROFIT after fees,
+           returns ≥ 50% on what you pay, and price confidence is ≥ 50%.
+     MAYBE when it's still profitable but misses one of those bars.
+     PASS  when you'd make nothing or lose money.
+     Score (1–100) = 70% return-on-cost (capped at 200%) + 30% confidence. */
+  const MIN_PROFIT = 5;
+  function verdictFor(perMarketplace, confidence, shopPrice) {
+    if (shopPrice == null || shopPrice === "" || isNaN(Number(shopPrice))) return null;
+    const cost = Number(shopPrice);
+    const best = perMarketplace.slice().sort((a, b) => b.profit - a.profit)[0];
+    const profit = best.profit;
+    const roi = cost > 0 ? profit / cost : null; // null = free find
+    const roiOk = roi == null ? profit > 0 : roi >= 0.5;
+    let call;
+    if (profit >= MIN_PROFIT && roiOk && confidence >= 50) call = "BUY";
+    else if (profit > 0) call = "MAYBE";
+    else call = "PASS";
+    const roiPart = roi == null ? (profit > 0 ? 1 : 0) : Math.max(0, Math.min(1, roi / 2));
+    const score = Math.max(1, Math.min(100, Math.round(roiPart * 70 + (confidence / 100) * 30 - (profit <= 0 ? 30 : 0))));
+    return { call, score, best: best.id, bestLabel: best.label, profit, roi, min: MIN_PROFIT, cost };
+  }
+
+  window.App.appraisal = { appraise, verdictFor, CONDITION_FACTOR };
 })();

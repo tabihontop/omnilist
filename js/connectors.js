@@ -65,6 +65,22 @@
     },
   };
 
+  // Where to send the seller to post ("sell") or to find/remove a listing ("manage").
+  const LINKS = {
+    ebay: { manage: { EU: "https://www.ebay.com/sh/lst/active", UK: "https://www.ebay.co.uk/sh/lst/active" } },
+    depop: { sell: { EU: "https://www.depop.com/sell/", UK: "https://www.depop.com/sell/" }, manage: { EU: "https://www.depop.com/", UK: "https://www.depop.com/" } },
+    vinted: { sell: { EU: "https://www.vinted.com/items/new", UK: "https://www.vinted.co.uk/items/new" }, manage: { EU: "https://www.vinted.com/", UK: "https://www.vinted.co.uk/" } },
+    facebook: { sell: { EU: "https://www.facebook.com/marketplace/create/item", UK: "https://www.facebook.com/marketplace/create/item" }, manage: { EU: "https://www.facebook.com/marketplace/you/selling", UK: "https://www.facebook.com/marketplace/you/selling" } },
+    sellpy: { sell: { EU: "https://www.sellpy.com/", UK: "https://www.sellpy.com/" }, manage: { EU: "https://www.sellpy.com/", UK: "https://www.sellpy.com/" } },
+  };
+  function linkFor(id, kind) {
+    const r = App.fees ? App.fees.region() : "EU";
+    const l = LINKS[id] && LINKS[id][kind];
+    if (l) return l[r] || l.EU;
+    const c = CONNECTORS[id];
+    return (c && (c.sellUrl || c.baseUrl)) || "#";
+  }
+
   function list() { return App.store.MARKETS.map((id) => CONNECTORS[id]); }
   function byId(id) { return CONNECTORS[id]; }
 
@@ -146,5 +162,5 @@
     return simulatedPublish(market, product, connection, onProgress);
   }
 
-  window.App.connectors = { list, byId, publish, CONNECTORS };
+  window.App.connectors = { list, byId, publish, linkFor, CONNECTORS };
 })();

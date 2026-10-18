@@ -306,6 +306,62 @@ table.tbl tr:hover td { background: var(--bg-2); }
 .center { text-align: center; }
 .mt-0 { margin-top: 0; } .mb-0 { margin-bottom: 0; }
 
+/* ---------- Sold / take-down / stale ---------- */
+.chip.chip-alert { border-color: rgba(248,113,113,.5); background: rgba(248,113,113,.10); }
+.attention { border-radius: var(--radius); padding: 14px 16px; margin-top: 18px; border: 1px solid; }
+.attention-danger { background: rgba(248,113,113,.07); border-color: rgba(248,113,113,.35); }
+.attention-warn { background: rgba(251,191,36,.06); border-color: rgba(251,191,36,.30); }
+.att-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.att-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--border-soft); border-radius: 10px; flex-wrap: wrap; }
+.mkt-logo.sm { width: 28px; height: 28px; border-radius: 7px; font-size: 11px; }
+.sold-ribbon { position: absolute; left: 8px; bottom: 8px; background: var(--success); color: #06281c; font-weight: 800; font-size: 11px; letter-spacing: .8px; padding: 3px 9px; border-radius: 999px; }
+.listing-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.stale-badge { color: var(--warn); font-weight: 600; }
+
+/* ---------- Inventory toolbar, filters, bulk ---------- */
+.inv-toolbar { margin-bottom: 10px; }
+.inv-toolbar input[type=search] { width: 100%; }
+.sort-sel { width: auto; min-width: 170px; }
+.filter-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-2); color: var(--muted); font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit; }
+.fchip:hover { color: var(--text); }
+.fchip.active { background: var(--elevated); color: var(--text); border-color: var(--accent); }
+.fchip.alert { border-color: rgba(248,113,113,.5); color: var(--danger); }
+.fchip .count { background: rgba(255,255,255,.08); border-radius: 999px; padding: 0 7px; font-size: 11px; }
+.listing-card.selectable { cursor: pointer; }
+.listing-card.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sel-box { position: absolute; top: 8px; left: 8px; width: 26px; height: 26px; border-radius: 8px; border: 2px solid #fff; background: rgba(0,0,0,.45); color: #fff; display: grid; place-items: center; font-weight: 800; }
+.sel-box.on { background: var(--accent); border-color: var(--accent); }
+.bulk-bar { position: sticky; bottom: 12px; z-index: 40; margin-top: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; background: var(--elevated); border: 1px solid var(--accent); border-radius: var(--radius); box-shadow: var(--shadow); }
+.bulk-bar .spacer { flex: 1; }
+
+/* ---------- Money: net / profit ---------- */
+.net-preview { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-2); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.net-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.rec-card.rec-best { border-color: var(--success); box-shadow: 0 0 0 1px rgba(52,211,153,.35); }
+.rec-line { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.rec-line strong { color: var(--text); }
+
+/* ---------- Buy / Pass verdict ---------- */
+.verdict { border-radius: var(--radius); padding: 16px 18px; border: 1px solid; display: grid; grid-template-columns: auto auto 1fr; gap: 8px 22px; align-items: center; }
+.verdict-buy { background: rgba(52,211,153,.08); border-color: rgba(52,211,153,.45); }
+.verdict-maybe { background: rgba(251,191,36,.07); border-color: rgba(251,191,36,.40); }
+.verdict-pass { background: rgba(248,113,113,.07); border-color: rgba(248,113,113,.40); }
+.verdict-call { font-size: 26px; font-weight: 800; letter-spacing: .5px; }
+.verdict-score .big { font-size: 30px; font-weight: 800; margin-right: 4px; }
+.verdict-reasons { margin: 0; padding-left: 18px; font-size: 13px; }
+.verdict .rule { grid-column: 1 / -1; }
+
+/* ---------- Settings, welcome, install ---------- */
+.fee-table input { width: 90px; padding: 7px 9px; }
+.table-wrap { overflow-x: auto; }
+.empty-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; text-align: left; }
+.empty-step { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: var(--bg-2); color: var(--text); display: block; }
+.empty-step:hover { border-color: var(--accent); text-decoration: none; }
+.empty-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-grad); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
+.install-slot { padding: 0 6px 6px; }
+
 /* ---------- Mobile ---------- */
 .mobile-only { display: none; }
 @media (max-width: 860px) {
@@ -317,8 +373,16 @@ table.tbl tr:hover td { background: var(--bg-2); }
     background: rgba(18,21,29,.96); backdrop-filter: blur(12px);
     justify-content: space-around;
   }
-  .brand, .nav-foot, .nav-spacer { display: none; }
-  .nav-item { flex-direction: column; gap: 3px; font-size: 10.5px; padding: 6px 8px; flex: 1; text-align: center; }
+  .brand, .nav-foot, .nav-spacer, .install-slot, .topbar-action { display: none; }
+  .acct-name { max-width: 120px; }
+  .topbar h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sidebar > .stack { flex-direction: row; width: 100%; gap: 2px; }
+  .nav-item { flex-direction: column; gap: 3px; font-size: 10px; padding: 6px 2px; flex: 1; text-align: center; min-width: 0; }
+  .nav-item span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .bulk-bar { bottom: 74px; }
+  .empty-steps { grid-template-columns: 1fr; }
+  .verdict { grid-template-columns: 1fr; }
+  .att-row .grow { flex-basis: 100%; }
   .nav-item .ico { font-size: 19px; }
   .main { padding-bottom: 66px; }
   .form-grid, .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }

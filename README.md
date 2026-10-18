@@ -33,15 +33,25 @@ Double-click **`index.html`**. Everything works **except** the live camera in *A
 
 | Feature | Where | Notes |
 |---|---|---|
-| **Cross-post one listing to all marketplaces** | New Listing → *Publish to selected* | Watch each marketplace publish live, with retry on failure. |
+| **Cross-post one listing to all marketplaces** | New Listing → *Publish to selected* | eBay via API; Vinted/Depop/Facebook/Sellpy as one-tap handoffs. |
+| **See what you'd keep before you list** | New Listing → *Your take* | Net after each marketplace's fee, and profit if you enter a cost. |
+| **Mark sold → take down everywhere else** | Card → *✓ Sold*, or Details | Records the sale; every other live listing goes on a red *Take these down* list with an Open ↗ link and a Done button. *Undo sale* restores everything. |
+| **Profit tracking** | Dashboard stats, Details, *Sales & profit* CSV | Sold price − fees − shipping − cost. Fees are per region (EU/UK) and editable. |
+| **Search, filter, sort, bulk actions** | Dashboard → *Your listings* | Filters: Active, Drafts, Ready to post, Take down, Stale, Sold. *☑ Select* for bulk mark sold, % price change, re-push, delete. |
+| **Stale-listing nudges** | Dashboard (amber panel) | Items unsold for 30+ days (configurable): −10% price, relist, or snooze. |
+| **Buy / Maybe / Pass call** | Appraise → enter *Shop price* | Profit per marketplace after fees, a 1–100 resale score and the rule it used. |
 | **Switch seller accounts** | Top-right account chip | Each profile has its own connections + listings. |
-| **Connect / disconnect marketplaces** | Marketplaces | Per-account. eBay = official API; Depop/Vinted = automation (ToS warning shown). |
-| **Scan & appraise an item** | Appraise | Camera capture or upload → estimated value, per-marketplace price, comps. |
-| **Create a listing from an appraisal** | Appraise → *Create listing from this* | Prefills New Listing with the suggested price + photo. |
-| **Manage listings** | Dashboard | Status per marketplace, re-push, view, delete. |
+| **Install as an app + offline** | Settings → *Install as an app* | Add to home screen; works offline after the first visit (service worker). |
+| **Backup, restore, CSV export** | Settings → *Your data* | JSON backup/restore (photos included), inventory CSV, sales & profit CSV, load demo, clear all. |
 
-Your data is saved in the browser's **localStorage**. Use the account menu →
-**Reset demo data** to restore the original sample.
+Your data is saved in the browser's **localStorage** only — download a backup from
+**Settings** now and then. New visitors start empty; *Settings → Load demo data* shows
+a filled-in example.
+
+### Fees
+Fee defaults (Settings → *Marketplace fees*) assume a **private (non-business) seller**
+and come from third-party fee guides checked Oct 2026, with a source link per row.
+Fees change and vary by country — check each marketplace's own fee page and edit them.
 
 ---
 
@@ -88,14 +98,19 @@ The prototype is structured so each external dependency is isolated:
 ```
 omnilist/
 ├─ index.html          # entry point (loads the scripts below in order)
+├─ manifest.webmanifest, sw.js, icons/   # installable app + offline cache
 ├─ assets/styles.css   # design system / all styling
 ├─ js/
 │  ├─ ui.js            # DOM helpers, formatting, toasts, modals, image resize
-│  ├─ store.js         # state + localStorage + demo seed data
-│  ├─ connectors.js    # marketplace registry + simulated publish  ← API seam
-│  ├─ appraisal.js     # value-estimation engine (simulated comps) ← data seam
-│  ├─ views.js         # all screens + shared components
-│  └─ app.js           # shell, hash router, account switcher, bootstrap
+│  ├─ store.js         # state + localStorage, sales/take-downs, settings, demo data
+│  ├─ fees.js          # EU/UK fee tables + net/profit math
+│  ├─ connectors.js    # marketplace registry + publish/handoff  ← API seam
+│  ├─ backend.js       # client for the local eBay backend
+│  ├─ appraisal.js     # value estimates + Buy/Maybe/Pass       ← data seam
+│  ├─ views.js         # New Listing, Appraise, Marketplaces, Accounts + shared parts
+│  ├─ inventory.js     # Dashboard: stats, take-downs, stale, filters, bulk actions
+│  ├─ settings.js      # Settings: region, fees, install, backup/export
+│  └─ app.js           # shell, hash router, account switcher, PWA, bootstrap
 ├─ serve.ps1           # zero-dependency local server (for the camera)
 ├─ start.bat           # double-click launcher
 └─ README.md
@@ -107,7 +122,9 @@ No build step, no dependencies, no framework — plain HTML/CSS/JS.
 
 ## Limitations (it's a prototype)
 
-- Marketplace posts and appraisal numbers are **simulated** — nothing is sent anywhere.
-- "View ↗" links on listings/comps are illustrative and won't resolve.
+- Appraisal comps are **estimates** (live eBay asking prices only when running locally with keys).
+- OmniList can't detect sales on other sites or remove listings for you — you mark the
+  sale, and it tells you exactly what to take down where.
+- Demo-data links are illustrative and won't resolve.
 - Data lives only in this browser (localStorage); clearing site data resets it.
 - Image identification from photos is a manual step until a vision API is wired in.

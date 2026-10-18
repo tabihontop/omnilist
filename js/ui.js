@@ -55,12 +55,18 @@
     cur = cur || "USD";
     const sym = CUR[cur] || "";
     const v = Math.round(Number(n) || 0);
-    return sym + v.toLocaleString("en-US");
+    return (v < 0 ? "-" : "") + sym + Math.abs(v).toLocaleString("en-US");
   }
   function money2(n, cur) {
     cur = cur || "USD";
     const sym = CUR[cur] || "";
-    return sym + (Number(n) || 0).toFixed(2);
+    const v = Number(n) || 0;
+    return (v < 0 ? "-" : "") + sym + Math.abs(v).toFixed(2);
+  }
+  // Whole amounts without decimals, otherwise two decimals (e.g. €58 / €0.30).
+  function moneyAuto(n, cur) {
+    const v = Math.round((Number(n) || 0) * 100) / 100;
+    return Number.isInteger(v) ? money(v, cur) : money2(v, cur);
   }
   function fmtDate(ts) {
     const d = new Date(ts);
@@ -222,7 +228,7 @@
   }
 
   window.App.ui = {
-    el, clear, frag, money, money2, fmtDate, timeAgo, escapeHtml, slugify, uid,
+    el, clear, frag, money, money2, moneyAuto, fmtDate, timeAgo, escapeHtml, slugify, uid,
     hashString, mulberry32, colorFor, initials, composeTitle,
     toast, modal, confirmDialog, prompt2,
     fileToDataURL, resizeImage,

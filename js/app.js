@@ -1,6 +1,7 @@
 /* ===========================================================================
-   app.js — shell (sidebar + topbar), hash router, account switcher, bootstrap
-   Attaches to window.App.app
+   app.js — shell (sidebar + topbar), hash router, account switcher,
+   installable-app (PWA) wiring, bootstrap
+   Attaches to window.App.app and window.App.pwa
    =========================================================================== */
 (function () {
   window.App = window.App || {};
@@ -13,9 +14,10 @@
     { key: "appraise",     path: "#/appraise",     label: "Appraise",     icon: "🔎", render: () => App.views.appraise() },
     { key: "marketplaces", path: "#/marketplaces", label: "Marketplaces", icon: "🛒", render: () => App.views.marketplaces() },
     { key: "accounts",     path: "#/accounts",     label: "Accounts",     icon: "👤", render: () => App.views.accounts() },
+    { key: "settings",     path: "#/settings",     label: "Settings",     icon: "⚙️", render: () => App.views.settings() },
   ];
 
-  let viewEl, titleEl, acctWrap;
+  let viewEl, titleEl, acctWrap, installSlot;
   const navItems = {};
 
   function currentRoute() {
@@ -77,12 +79,7 @@
     dd.appendChild(el(".dd-item", { onClick: () => { close(); navigate("#/accounts"); } }, [el("span.ico", "👤"), "Manage accounts"]));
     dd.appendChild(el(".dd-item", { onClick: () => { close(); addQuick(); } }, [el("span.ico", "＋"), "Add account"]));
     dd.appendChild(el(".dd-sep"));
-    dd.appendChild(el(".dd-item", { onClick: async () => {
-      close();
-      if (await App.ui.confirmDialog("Reset demo data?", "Restores the original sample accounts & listings and clears your changes.", "Reset", "danger")) {
-        store.resetDemo(); renderChrome(); navigate("#/"); rerender(); App.ui.toast("Demo reset", "Sample data restored.", "ok");
-      }
-    } }, [el("span.ico", "↺"), "Reset demo data"]));
+    dd.appendChild(el(".dd-item", { onClick: () => { close(); navigate("#/settings"); } }, [el("span.ico", "⚙️"), "Settings & backup"]));
     return dd;
   }
   function addQuick() {
@@ -91,6 +88,34 @@
     });
   }
   function renderChrome() { clear(acctWrap); acctWrap.appendChild(buildAcctSwitcher()); }
+
+  /* ---------- installable app (PWA) ---------- */
+  const pwa = {
+    deferred: null,
+    installed: !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true,
+    canInstall() { return !!this.deferred; },
+    async install() {
+      if (!this.deferred) return false;
+      this.deferred.prompt();
+      const choice = await this.deferred.userChoice.catch(() => null);
+      this.deferred = null;
+      renderInstall();
+      return !!(choice && choice.outcome === "accepted");
+    },
+  };
+  window.App.pwa = pwa;
+  function renderInstall() {
+    if (!installSlot) return;
+    clear(installSlot);
+    if (pwa.canInstall() && !pwa.installed) installSlot.appendChild(el("button.btn.sm.primary.block", { onClick: () => pwa.install() }, "⬇ Install app"));
+  }
+  window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); pwa.deferred = e; renderInstall(); });
+  window.addEventListener("appinstalled", () => { pwa.installed = true; pwa.deferred = null; renderInstall(); App.ui.toast("Installed", "OmniList is on your home screen.", "ok"); });
+  function registerServiceWorker() {
+    const secure = location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+    if (!("serviceWorker" in navigator) || !secure) return;
+    navigator.serviceWorker.register("sw.js").catch((e) => console.warn("Service worker not registered", e));
+  }
 
   /* ---------- shell ---------- */
   function build() {
@@ -103,11 +128,13 @@
       navItems[r.key] = item;
       nav.appendChild(item);
     });
+    installSlot = el(".install-slot");
     const sidebar = el(".sidebar", [
       el(".brand", [el(".brand-logo", "◆"), el("div", [el(".brand-name", "OmniList"), el(".brand-sub", "Cross-list & appraise")])]),
       nav,
       el(".nav-spacer"),
-      el(".nav-foot", [el("div", "Prototype · demo connectors"), el("a", { href: "#/marketplaces" }, "How real APIs plug in →")]),
+      installSlot,
+      el(".nav-foot", [el("div", "Your data stays in this browser."), el("a", { href: "#/settings" }, "Back it up →")]),
     ]);
 
     titleEl = el("h1", "Dashboard");
@@ -115,20 +142,22 @@
     const topbar = el(".topbar", [
       titleEl,
       el(".spacer"),
-      el("button.btn.sm", { onClick: () => navigate("#/appraise") }, "🔎 Scan"),
-      el("button.btn.primary.sm", { onClick: () => navigate("#/new") }, "＋ New"),
+      el("button.btn.sm.topbar-action", { onClick: () => navigate("#/appraise") }, "🔎 Scan"),
+      el("button.btn.primary.sm.topbar-action", { onClick: () => navigate("#/new") }, "＋ New"),
       acctWrap,
     ]);
 
     viewEl = el("div#view");
     appRoot.appendChild(el(".shell", [sidebar, el(".main", [topbar, viewEl])]));
     renderChrome();
+    renderInstall();
   }
 
   function boot() {
     build();
     rerender();
     window.addEventListener("hashchange", rerender);
+    registerServiceWorker();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();

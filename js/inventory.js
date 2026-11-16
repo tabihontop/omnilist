@@ -57,8 +57,53 @@
   function openUrl(p, m) {
     const l = p.listings[m] || {};
     const sell = connectors.linkFor(m, "sell");
-    const url = l.url && l.url !== sell && !/\/items\/new|\/sell\/?$|\/create\/item/.test(l.url) ? l.url : connectors.linkFor(m, "manage");
-    window.open(url, "_blank", "noopener");
+    const own = App.ui.safeUrl(l.url);
+    const url = own && own !== sell && !/\/items\/new|\/sell\/?$|\/create\/item/.test(own) ? own : connectors.linkFor(m, "manage");
+    App.ui.openSafe(url);
+  }
+
+  /* ---------- Price changes on listings that are already up ---------- */
+  // OmniList can't change a price on Vinted/Depop/etc. (no API), so a price
+  // change flags every live listing with an "Update price" reminder instead of
+  // re-preparing it (which would lose its URL and its take-down tracking).
+  function openPriceUpdate(p0, m) {
+    const p = store.getProduct(p0.id) || p0;
+    const c = connectors.byId(m);
+    const l = p.listings[m] || {};
+    const cur = curOf(p);
+    const clear = () => { const now = store.getProduct(p.id); if (now && now.listings[m]) store.setListing(p.id, m, Object.assign({}, now.listings[m], { priceChanged: false })); };
+    const ebayBtn = el("button.btn.primary.block", { style: { display: "none" } }, "Update on eBay now");
+    let updating = false;
+    ebayBtn.addEventListener("click", async () => {
+      if (updating) return;
+      updating = true; ebayBtn.disabled = true; ebayBtn.textContent = "Updating eBay…";
+      const res = await connectors.realEbayPublish(store.getProduct(p.id) || p);
+      const now = store.getProduct(p.id);
+      if (res.status === "live") {
+        store.setListing(p.id, m, Object.assign(res, { priceChanged: false }));
+        m0.close(); App.app.refreshIf("dashboard");
+        toast("eBay updated", "New price " + moneyAuto(p.price, cur) + " is live.", "ok");
+      } else {
+        // Keep the listing live (it still is) and keep the reminder; only remember the ids.
+        if (now && now.listings[m]) store.setListing(p.id, m, Object.assign({}, now.listings[m], connectors.ebayIds(res)));
+        updating = false; ebayBtn.disabled = false; ebayBtn.textContent = "Update on eBay now";
+        toast("eBay not updated", res.message || "Update failed", "err");
+      }
+    });
+    if (m === "ebay" && l.offerId) connectors.ebayLiveAvailable().then((ok) => { if (ok) ebayBtn.style.display = ""; });
+    const m0 = modal({
+      title: "Update price on " + c.label,
+      body: el(".stack", [
+        el("div", ["You changed “" + p.title + "” to ", el("strong", moneyAuto(p.price, cur)), ". It's still listed on " + c.label + " at the old price."]),
+        ebayBtn,
+        el("button.btn.block", { onClick: () => openUrl(p, m) }, "Open " + c.label + " ↗"),
+        el(".small.muted", "Change the price on " + c.label + ", then tap “I've updated it”."),
+      ]),
+      actions: [
+        { label: "Close" },
+        { label: "I've updated it", kind: "primary", onClick: (close) => { clear(); close(); App.app.rerender(); toast("Price reminder cleared", c.label + " marked as up to date.", "ok"); } },
+      ],
+    });
   }
   function openDelist(p, m) {
     const c = connectors.byId(m);
@@ -142,28 +187,47 @@
     if (await confirmDialog("Undo this sale?", "Puts every marketplace back the way it was before you marked it sold.", "Undo sale")) { store.undoSale(p.id); App.app.rerender(); toast("Sale undone", p.title + " is back in your inventory.", "ok"); }
   }
 
+  // Returns how many live listings now carry an "Update price" reminder.
   function changePrice(p, price) {
+    const np = Math.max(0.01, fees.round2(price));
+    if (np === p.price) return 0;
+    const listings = Object.assign({}, p.listings);
+    let flagged = 0;
+    store.MARKETS.forEach((m) => {
+      if (listings[m] && listings[m].status === "live") { listings[m] = Object.assign({}, listings[m], { priceChanged: true }); flagged++; }
+    });
     store.updateProduct(p.id, {
-      price: Math.max(0.01, fees.round2(price)),
+      price: np,
       refreshedAt: Date.now(),
+      listings,
       priceHistory: (p.priceHistory || []).concat([{ price: p.price, at: Date.now() }]),
     });
+    return flagged;
+  }
+  function priceNote(flagged) {
+    return flagged ? plural(flagged, "live listing") + " now show “Update price” — change the price there too." : "Prepared listings already use the new price.";
   }
 
   async function editItem(p) {
-    const r = await prompt2("Edit price & cost", [
-      { name: "price", label: "Price (" + curOf(p) + ")", value: String(p.price) },
-      { name: "cost", label: "Cost — what you paid (blank = unknown)", value: p.cost == null ? "" : String(p.cost) },
-    ], "Save");
+    const sold = !!p.sale;
+    const fields = sold ? [] : [{ name: "price", label: "Price (" + curOf(p) + ")", value: String(p.price) }];
+    fields.push({ name: "cost", label: "Cost — what you paid (blank = unknown)", value: p.cost == null ? "" : String(p.cost) });
+    const r = await prompt2(sold ? "Edit cost" : "Edit price & cost", fields, "Save");
     if (!r) return;
-    const price = Number(String(r.price).replace(",", "."));
-    const cost = r.cost === "" ? null : Number(String(r.cost).replace(",", "."));
+    const price = sold ? p.price : Number(String(r.price).replace(",", "."));
+    const cost = String(r.cost).trim() === "" ? null : Number(String(r.cost).replace(",", "."));
     if (!(price > 0) || (cost != null && !(cost >= 0))) { toast("Check the numbers", "Price must be above 0 and cost can't be negative.", "warn"); return; }
-    if (price !== p.price && !p.sale) changePrice(p, price);
-    store.updateProduct(p.id, { cost });
-    if (p.sale) { p.sale.cost = cost; p.sale.profit = cost == null ? null : fees.round2(p.sale.net - cost); store.save(); }
+    const parts = [];
+    let flagged = 0;
+    if (!sold && price !== p.price) { flagged = changePrice(p, price); parts.push("price"); }
+    if (cost !== p.cost) {
+      store.updateProduct(p.id, { cost });
+      if (sold) { p.sale.cost = cost; p.sale.profit = cost == null ? null : fees.round2(p.sale.net - cost); store.save(); }
+      parts.push("cost");
+    }
     App.app.rerender();
-    toast("Saved", "Price and cost updated.", "ok");
+    if (!parts.length) { toast("No changes", "Nothing was different.", "ok"); return; }
+    toast("Saved", (parts.length === 2 ? "Price and cost" : parts[0] === "price" ? "Price" : sold ? "Cost (and the sale's profit)" : "Cost") + " updated." + (parts.indexOf("price") !== -1 ? " " + priceNote(flagged) : ""), flagged ? "warn" : "ok");
   }
 
   /* ---------- Listing card & details ---------- */
@@ -190,7 +254,7 @@
 
     const acts = p.sale
       ? [btn("Details", () => openListingDetail(p)), btn("↩ Undo sale", () => undoSale(p))]
-      : [btn("Details", () => openListingDetail(p)), btn("✓ Sold", () => markSoldFlow(p), "Mark as sold"), btn("↻ Re-push", () => V.republish(p), "Re-push to marketplaces")];
+      : [btn("Details", () => openListingDetail(p)), btn("✓ Sold", () => markSoldFlow(p), "Mark as sold")].concat(V.repushTargets(p).length ? [btn("↻ Re-push", () => V.republish(p), "Post the drafts / failed / prepared listings again")] : []);
     acts.push(el("button.btn.sm.ghost", { style: { marginLeft: "auto" }, title: "Delete", onClick: async (e) => {
       e.stopPropagation();
       if (await confirmDialog("Delete listing?", "“" + p.title + "” will be removed.", "Delete", "danger")) { store.removeProduct(p.id); inv.selected.delete(p.id); App.app.rerender(); }
@@ -238,7 +302,7 @@
     if (s) actions.push({ label: "↩ Undo sale", onClick: (close) => { close(); undoSale(p); } });
     else actions.push({ label: "✓ Mark sold", kind: "primary", onClick: (close) => { close(); markSoldFlow(p); } });
     actions.push({ label: "Close" });
-    modal({ title: "Listing details", body, actions, onClose: () => App.app.rerender() });
+    modal({ title: "Listing details", body, actions, onClose: () => App.app.refreshIf("dashboard") });
   }
 
   /* ---------- Attention panels ---------- */
@@ -273,8 +337,8 @@
         const np = fees.round2(old * 0.9);
         return el(".att-row", [
           el(".grow", [el("div", { style: { fontWeight: "600" } }, p.title), el(".small.muted", ageDays(p) + " days · " + moneyAuto(old, cur))]),
-          el("button.btn.sm", { title: "Lower the price by 10%", onClick: () => { changePrice(p, np); App.app.rerender(); toast("Price dropped", moneyAuto(old, cur) + " → " + moneyAuto(np, cur) + ". Handoff copies use the new price; re-push to update eBay.", "ok"); } }, "−10% → " + moneyAuto(np, cur)),
-          el("button.btn.sm", { onClick: () => V.republish(p) }, "↻ Relist"),
+          el("button.btn.sm", { title: "Lower the price by 10%", onClick: () => { const f = changePrice(p, np); App.app.rerender(); toast("Price dropped", moneyAuto(old, cur) + " → " + moneyAuto(np, cur) + ". " + priceNote(f), f ? "warn" : "ok"); } }, "−10% → " + moneyAuto(np, cur)),
+          V.repushTargets(p).length ? el("button.btn.sm", { onClick: () => V.republish(p) }, "↻ Relist") : null,
           el("button.btn.sm.ghost", { title: "Hide for another " + days + " days", onClick: () => { store.updateProduct(p.id, { refreshedAt: Date.now() }); App.app.rerender(); } }, "Snooze"),
         ]);
       })),
@@ -286,19 +350,53 @@
   function selectedProducts() { return Array.from(inv.selected).map((id) => store.getProduct(id)).filter(Boolean); }
   function endSelecting() { inv.selecting = false; inv.selected.clear(); App.app.rerender(); }
 
+  // One bulk action at a time: a double-click (or a second action while a
+  // re-push is still running) is ignored instead of running twice.
+  let bulkBusy = false;
+  function bulk(fn) {
+    return async function () {
+      if (bulkBusy) { toast("Still working", "Wait for the current bulk action to finish.", "warn"); return; }
+      bulkBusy = true;
+      try { await fn(); } finally { bulkBusy = false; }
+    };
+  }
+
   function bulkSold() {
     const ps = selectedProducts().filter((p) => !p.sale);
-    if (!ps.length) { toast("Nothing to mark", "The selected items are already sold.", "warn"); return; }
+    if (!ps.length) { toast("Nothing to mark", "The selected items are already sold.", "warn"); return Promise.resolve(); }
     const sel = el("select", store.MARKETS.map((m) => el("option", { value: m }, connectors.byId(m).label)).concat([el("option", { value: "other" }, "In person / elsewhere")]));
-    modal({
-      title: "Mark " + plural(ps.length, "item") + " sold",
-      body: el(".stack", [el("label.field", [el("span.lab", "Sold on"), sel]), el(".small.muted", "Each item is recorded at its listed price with no shipping cost. Open an item afterwards to adjust it.")]),
-      actions: [{ label: "Cancel" }, { label: "Mark sold", kind: "primary", onClick: (close) => {
-        let n = 0;
-        ps.forEach((p) => { n += store.markSold(p.id, { market: sel.value, price: p.price, shipping: 0 }); });
-        close(); endSelecting();
-        toast("Marked " + plural(ps.length, "item") + " sold", n ? plural(n, "listing") + " to take down." : "Nothing left to take down.", n ? "warn" : "ok");
-      } }],
+    const readyCount = () => ps.reduce((n, p) => n + store.MARKETS.filter((m) => m !== sel.value && p.listings[m] && p.listings[m].status === "ready").length, 0);
+    const postedCb = el("input", { type: "checkbox" });
+    const readyRow = el("label.check-row", [postedCb, el("span")]);
+    function drawReady() {
+      const n = readyCount();
+      readyRow.style.display = n ? "" : "none";
+      readyRow.lastChild.textContent = "I also posted the " + plural(n, "“Ready to post” listing") + " — put them on the take-down list";
+    }
+    sel.addEventListener("change", drawReady);
+    drawReady();
+    return new Promise((resolve) => {
+      let done = false;
+      modal({
+        title: "Mark " + plural(ps.length, "item") + " sold",
+        body: el(".stack", [
+          el("label.field", [el("span.lab", "Sold on"), sel]),
+          readyRow,
+          el(".small.muted", "Each item is recorded at its listed price with no shipping cost. Open an item afterwards to adjust it."),
+        ]),
+        actions: [{ label: "Cancel" }, { label: "Mark sold", kind: "primary", onClick: (close) => {
+          if (done) return;
+          done = true;
+          let n = 0;
+          ps.forEach((p) => {
+            const postedReady = postedCb.checked ? store.MARKETS.filter((m) => m !== sel.value && p.listings[m] && p.listings[m].status === "ready") : [];
+            n += store.markSold(p.id, { market: sel.value, price: p.price, shipping: 0, postedReady });
+          });
+          close(); endSelecting();
+          toast("Marked " + plural(ps.length, "item") + " sold", n ? plural(n, "listing") + " to take down." : "Nothing left to take down.", n ? "warn" : "ok");
+        } }],
+        onClose: () => resolve(),
+      });
     });
   }
   async function bulkPrice() {
@@ -308,24 +406,29 @@
     if (!r) return;
     const pct = parseFloat(String(r.pct).replace(",", "."));
     if (!isFinite(pct) || pct <= -100) { toast("Enter a percentage", "For example -10.", "warn"); return; }
-    ps.forEach((p) => changePrice(p, p.price * (1 + pct / 100)));
+    let flagged = 0;
+    ps.forEach((p) => { flagged += changePrice(p, p.price * (1 + pct / 100)); });
     endSelecting();
-    toast("Prices updated", plural(ps.length, "item") + (pct < 0 ? " lowered " : " raised ") + Math.abs(pct) + "%. Re-push to update eBay; handoff copies already use the new price.", "ok");
+    toast("Prices updated", plural(ps.length, "item") + (pct < 0 ? " lowered " : " raised ") + Math.abs(pct) + "%. " + priceNote(flagged), flagged ? "warn" : "ok");
   }
   async function bulkRepush() {
-    const ps = selectedProducts().filter((p) => !p.sale);
+    const ps = selectedProducts().filter((p) => !p.sale && V.repushTargets(p).length);
+    const skipped = inv.selected.size - ps.length;
     endSelecting();
-    if (!ps.length) return;
-    toast("Re-pushing " + plural(ps.length, "item") + "…", "Keep this tab open until it finishes.", "ok");
+    if (!ps.length) { toast("Nothing to re-push", "The selected items are already live (or sold). Price changes show an “Update price” reminder.", "warn"); return; }
+    toast("Re-pushing " + plural(ps.length, "item") + "…", (skipped ? plural(skipped, "item") + " already live or sold skipped. " : "") + "Keep this tab open until it finishes.", "ok");
     let live = 0, ready = 0, failed = 0;
-    for (const p of ps) {
-      let targets = store.MARKETS.filter((m) => p.listings[m] && V.CLOSED.indexOf(p.listings[m].status) === -1);
+    for (const p0 of ps) {
+      const p = store.getProduct(p0.id);
+      if (!p) continue;
+      let targets = V.repushTargets(p);
       if (targets.indexOf("ebay") !== -1 && !(await V.ensureEbayReady(p))) targets = targets.filter((m) => m !== "ebay");
+      if (!targets.length) continue;
       store.updateProduct(p.id, { refreshedAt: Date.now() });
-      const results = await Promise.all(targets.map((m) => { store.setListing(p.id, m, { status: "pending", message: "Queued…", listedAt: Date.now() }); return V.publishOne(p, m); }));
+      const results = await Promise.all(targets.map((m) => { store.setListing(p.id, m, V.pendingListing(p, m)); return V.publishOne(p, m); }));
       results.forEach((r) => { if (r.status === "live") live++; else if (r.status === "ready") ready++; else if (r.status === "error") failed++; });
     }
-    App.app.rerender();
+    App.app.refreshIf("dashboard");
     toast("Re-push complete", [live && live + " live", ready && ready + " ready to post", failed && failed + " failed"].filter(Boolean).join(", ") || "done", failed ? "warn" : "ok");
   }
   async function bulkDelete() {
@@ -336,6 +439,7 @@
     endSelecting();
     toast("Deleted", plural(ps.length, "item") + " removed.", "ok");
   }
+  const runBulkSold = bulk(bulkSold), runBulkPrice = bulk(bulkPrice), runBulkRepush = bulk(bulkRepush), runBulkDelete = bulk(bulkDelete);
 
   function drawBulkBar() {
     App.ui.clear(refs.bulk);
@@ -350,10 +454,10 @@
         drawInventory();
       } }, "Select all shown"),
       el(".spacer"),
-      el("button.btn.sm", { disabled: !n, onClick: bulkSold }, "✓ Mark sold"),
-      el("button.btn.sm", { disabled: !n, onClick: bulkPrice }, "％ Change price"),
-      el("button.btn.sm", { disabled: !n, onClick: bulkRepush }, "↻ Re-push"),
-      el("button.btn.sm.danger", { disabled: !n, onClick: bulkDelete }, "🗑 Delete"),
+      el("button.btn.sm", { disabled: !n, onClick: runBulkSold }, "✓ Mark sold"),
+      el("button.btn.sm", { disabled: !n, onClick: runBulkPrice }, "％ Change price"),
+      el("button.btn.sm", { disabled: !n, onClick: runBulkRepush }, "↻ Re-push"),
+      el("button.btn.sm.danger", { disabled: !n, onClick: runBulkDelete }, "🗑 Delete"),
     ]));
   }
 
@@ -469,7 +573,7 @@
     if (aprs.length) {
       root.appendChild(el("h3", { style: { margin: "26px 0 12px" } }, "Recent appraisals"));
       root.appendChild(el(".card", { style: { padding: "4px 0" } }, aprs.slice(0, 5).map((a) => el(".comp", [
-        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt) + (a.result.verdict ? " · " + a.result.verdict.call : ""))]),
+        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt) + (a.result.mode === "live" ? (a.result.verdict ? " · " + a.result.verdict.call : "") : " · demo"))]),
         el("div.c-price", money(a.result.aggregate.median, a.result.currency)),
       ]))));
     }
@@ -477,5 +581,5 @@
   }
 
   App.views.dashboard = dashboard;
-  window.App.inventory = { openDelist, markSoldFlow, openListingDetail, undoSale, isStale, ageDays };
+  window.App.inventory = { openDelist, openPriceUpdate, markSoldFlow, openListingDetail, undoSale, isStale, ageDays };
 })();

@@ -6,7 +6,7 @@
    =========================================================================== */
 (function () {
   window.App = window.App || {};
-  const { el, money, moneyAuto, timeAgo, toast, modal, confirmDialog, prompt2, fileToDataURL, resizeImage } = App.ui;
+  const { el, money, moneyAuto, timeAgo, toast, modal, confirmDialog, prompt2, fileToDataURL, resizeImage, safeUrl } = App.ui;
   const store = App.store;
   const connectors = App.connectors;
   const fees = App.fees;
@@ -14,8 +14,10 @@
   const CATEGORIES = ["Clothing", "Shoes", "Accessories", "Bags", "Electronics", "Home", "Toys & Games", "Books", "Beauty", "Other"];
   const CONDITIONS = ["New", "Like new", "Good", "Fair", "Poor"];
   const CURRENCIES = ["EUR", "GBP", "USD"];
-  // Listing states that can't be re-pushed.
-  const CLOSED = ["skipped", "sold", "needs_delist", "delisted"];
+  // Re-push only ever touches listings that are NOT up on a marketplace.
+  // Live listings are never re-prepared (that would lose their URL and break
+  // take-down tracking); price changes on them get an "Update price" reminder.
+  const REPUSHABLE = ["draft", "error", "ready", "pending"];
 
   function go(route) { location.hash = route; }
   function selectEl(options, value) {
@@ -31,14 +33,28 @@
   function statusLabel(s) { return LABELS[s] || s; }
   function statusColorVar(s) { return COLORS[s] || "var(--muted)"; }
   function signed(n, cur) { return (n >= 0 ? "+" : "") + moneyAuto(n, cur); }
+  function repushTargets(p) { return store.MARKETS.filter((m) => p.listings[m] && REPUSHABLE.indexOf(p.listings[m].status) !== -1); }
+  // Disables buttons while an async handler runs so a double-click can't run it twice.
+  function guard(buttons, fn) {
+    let busy = false;
+    return async function () {
+      if (busy) return;
+      busy = true;
+      buttons().forEach((b) => { if (b) b.disabled = true; });
+      try { return await fn.apply(this, arguments); }
+      finally { busy = false; buttons().forEach((b) => { if (b) b.disabled = false; }); }
+    };
+  }
+  function refreshDashboard() { App.app.refreshIf("dashboard"); }
 
   /* ---------- shared: marketplace status chip ---------- */
   function statusChip(marketId, lst, product) {
     const c = connectors.byId(marketId);
     const s = (lst && lst.status) || "skipped";
-    let action = null, text = statusLabel(s), title = (lst && lst.message) || statusLabel(s);
-    if (product && s === "ready" && c.handoff) { action = () => openHandoff(product, marketId); text = "Post now ↗"; title = "Tap to post on " + c.label; }
+    let action = null, text = statusLabel(s), title = (lst && lst.message) || statusLabel(s), color = statusColorVar(s);
+    if (product && s === "ready") { action = () => openHandoff(product, marketId); text = "Post now ↗"; title = "Tap to post on " + c.label; }
     else if (product && s === "needs_delist") { action = () => App.inventory.openDelist(product, marketId); text = "Take down ↗"; title = "Sold elsewhere — take this listing down"; }
+    else if (product && s === "live" && lst.priceChanged) { action = () => App.inventory.openPriceUpdate(product, marketId); text = "Update price ↗"; title = "You changed the price — update it on " + c.label; color = "var(--warn)"; }
     return el("span.chip" + (s === "needs_delist" ? ".chip-alert" : ""), {
       title,
       style: action ? { cursor: "pointer" } : null,
@@ -46,11 +62,17 @@
     }, [
       el("span.mkt-dot", { style: { background: c.color } }),
       el("span", { style: { fontWeight: "600" } }, c.label),
-      el("span.small", { style: { color: statusColorVar(s) } }, text),
+      el("span.small", { style: { color } }, text),
     ]);
   }
 
   /* ---------- shared: publish engine ---------- */
+  // "pending" placeholder that keeps eBay's sku/offerId so a retry updates the
+  // same eBay listing instead of creating a duplicate.
+  function pendingListing(product, market) {
+    const keep = market === "ebay" ? connectors.ebayIds(product.listings[market]) : {};
+    return Object.assign(keep, { status: "pending", message: "Queued…", listedAt: Date.now() });
+  }
   function publishOne(product, market, onProgress) {
     const acc = store.accounts().find((a) => a.id === product.accountId) || store.activeAccount();
     const conn = acc.connections[market];
@@ -76,10 +98,12 @@
       setResult(res) {
         App.ui.clear(right);
         if (res.status === "live") {
+          if (res.priceChanged) right.appendChild(el("button.btn.sm", { onClick: () => App.inventory.openPriceUpdate(product, market) }, "Update price"));
           right.appendChild(el("span.badge.ok", "✓ Live"));
           App.ui.clear(msgEl);
-          msgEl.appendChild(document.createTextNode((res.message || "Published") + " · "));
-          msgEl.appendChild(el("a", { href: res.url || "#", target: "_blank", rel: "noopener" }, "View ↗"));
+          msgEl.appendChild(document.createTextNode(res.message || "Published"));
+          const href = safeUrl(res.url);
+          if (href) { msgEl.appendChild(document.createTextNode(" · ")); msgEl.appendChild(el("a", { href, target: "_blank", rel: "noopener noreferrer" }, "View ↗")); }
         } else if (res.status === "pending") {
           right.appendChild(el("span.badge.warn", "Pending"));
           api.setMsg(res.message || "Pending");
@@ -108,12 +132,15 @@
         }
       },
     };
+    let reposting = false;
     function repost(msg) {
+      if (reposting) return;
+      reposting = true;
       App.ui.clear(right);
       right.appendChild(el(".spinner"));
       api.setMsg(msg);
-      store.setListing(product.id, market, { status: "pending", message: "Queued…", listedAt: Date.now() });
-      publishOne(product, market, api.setMsg).then((r) => api.setResult(r));
+      store.setListing(product.id, market, pendingListing(product, market));
+      publishOne(product, market, api.setMsg).then((r) => { reposting = false; api.setResult(r); });
     }
     return api;
   }
@@ -122,7 +149,7 @@
     const rows = marketIds.map((m) => pubRow(m, product));
     const container = el(".stack", rows.map((r) => r.node));
     const promise = Promise.all(marketIds.map((m, i) => {
-      store.setListing(product.id, m, { status: "pending", message: "Queued…", listedAt: Date.now() });
+      store.setListing(product.id, m, pendingListing(product, m));
       return publishOne(product, m, (stage) => rows[i].setMsg(stage)).then((res) => {
         rows[i].setResult(res);
         return { m, res };
@@ -142,27 +169,37 @@
     toast(verb + " complete", parts.join(", ") || "done", err ? "warn" : "ok");
   }
 
+  // One re-push per item at a time (a double-click must not run it twice).
+  const repushing = new Set();
   async function republish(p) {
+    if (repushing.has(p.id)) return;
+    repushing.add(p.id);
+    try { await republishNow(p); } finally { repushing.delete(p.id); }
+  }
+  async function republishNow(p) {
     if (p.sale) { toast("Already sold", "Undo the sale first if you want to list it again.", "warn"); return; }
-    let targets = store.MARKETS.filter((m) => p.listings[m] && CLOSED.indexOf(p.listings[m].status) === -1);
-    if (!targets.length) { toast("Nothing to re-push", "This item isn't targeting any marketplace.", "warn"); return; }
+    let targets = repushTargets(p);
+    if (!targets.length) {
+      const live = store.MARKETS.filter((m) => p.listings[m] && p.listings[m].status === "live");
+      toast("Nothing to re-push", live.length ? "It's already live everywhere it's listed. Price changes show an “Update price” reminder on each marketplace." : "This item isn't targeting any marketplace.", "warn");
+      return;
+    }
     if (targets.indexOf("ebay") !== -1) {
       const ok = await ensureEbayReady(p);
       if (!ok) { store.setListing(p.id, "ebay", { status: "skipped", message: "Skipped - item specifics not provided" }); targets = targets.filter((m) => m !== "ebay"); }
     }
-    if (!targets.length) { App.app.rerender(); return; }
+    if (!targets.length) { refreshDashboard(); return; }
     store.updateProduct(p.id, { refreshedAt: Date.now() }); // a relist restarts the "stale" clock
     const { node, promise } = runPublishUI(p, targets);
-    modal({ title: "Re-pushing " + p.title, body: node, actions: [{ label: "Done", kind: "primary", onClick: (c) => { c(); App.app.rerender(); } }] });
-    promise.then((r) => summarize(r, "Re-push"));
+    let open = true;
+    modal({ title: "Re-pushing " + p.title, body: node, actions: [{ label: "Done", kind: "primary" }], onClose: () => { open = false; refreshDashboard(); } });
+    await promise.then((r) => { summarize(r, "Re-push"); if (!open) refreshDashboard(); });
   }
 
   // For eBay live publishing: resolve category + collect any required item specifics.
   // Returns true to proceed, false if the user skipped eBay.
   async function ensureEbayReady(product) {
-    let st;
-    try { st = await App.backend.status(); } catch (e) { return true; }
-    if (!(st && st.ebay && st.ebay.configured && st.ebay.userAuthorized)) return true; // simulated mode
+    if (!(await connectors.ebayLiveAvailable())) return true; // eBay will be a manual handoff
     if (product.ebayCategoryId && product.ebayAspects && Object.keys(product.ebayAspects).length) return true; // already prepared
     const r = await App.backend.ebayAspects(product.title);
     if (!r || !r.ok || !r.categoryId) return true; // let the publish call surface any issue
@@ -208,7 +245,7 @@
     });
   }
 
-  /* ---------- Handoff marketplaces: one-tap manual posting (no automation) ---------- */
+  /* ---------- Handoff: one-tap manual posting (no automation) ---------- */
   function copyText(text, ev) {
     const flash = () => { if (ev && ev.target) { const b = ev.target; const old = b.textContent; b.textContent = "Copied!"; setTimeout(() => { b.textContent = old; }, 1200); } };
     if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash)); }
@@ -220,6 +257,16 @@
     try { document.execCommand("copy"); } catch (e) { /* ignore */ }
     ta.remove(); if (done) done();
   }
+  async function askListingUrl(label) {
+    for (;;) {
+      const r = await prompt2("Mark " + label + " as posted", [{ name: "url", label: label + " listing URL (optional — makes taking it down later one tap)", placeholder: "https://..." }], "Save");
+      if (!r) return null;
+      if (!r.url) return { url: null };
+      const u = safeUrl(r.url);
+      if (u) return { url: u };
+      toast("That isn't a web address", "Paste the listing's address (starting with https://), or leave it empty.", "warn");
+    }
+  }
   function openHandoff(product, marketId) {
     const c = connectors.byId(marketId);
     const fields = [
@@ -228,11 +275,14 @@
       ["Condition", product.condition], ["Description", product.description],
     ].filter((f) => f[1]);
     const copyAll = fields.map((f) => f[0] + ": " + f[1]).join("\n");
-    const photos = product.photos || [];
+    const photos = (product.photos || []).filter((s) => /^data:image\//.test(s));
+    const why = c.hasOfficialApi
+      ? [el("strong", "eBay isn't connected here"), ", so OmniList prepared the listing for you. (The desktop version with your eBay keys posts it automatically.) Open eBay, drop in these details + photos, and post."]
+      : [el("strong", c.label + " has no public API"), ", so OmniList won't auto-post it (that breaks their rules). Open " + c.label + ", drop in these details + photos, and tap post."];
     const body = el(".stack", [
-      el(".note.info", [el("span.ni", "ℹ️"), el("span", [el("strong", c.label + " has no public API"), ", so OmniList won't auto-post it (that breaks their rules). Open " + c.label + ", drop in these details + photos, and tap post."])]),
+      el(".note.info", [el("span.ni", "ℹ️"), el("span", why)]),
       c.sellNote ? el(".small.muted", c.sellNote) : null,
-      el("button.btn.primary.block", { onClick: () => window.open(connectors.linkFor(marketId, "sell"), "_blank", "noopener") }, "Open " + c.label + " new listing ↗"),
+      el("button.btn.primary.block", { onClick: () => App.ui.openSafe(connectors.linkFor(marketId, "sell")) }, "Open " + c.label + " new listing ↗"),
       photos.length ? el("div", [
         el(".small.muted", { style: { margin: "6px 0 6px" } }, "Photos — download, then upload to " + c.label),
         el(".photo-grid", photos.map((src, i) => el(".photo-tile", { style: { backgroundImage: "url(" + src + ")" } },
@@ -250,10 +300,11 @@
       actions: [
         { label: "Mark as posted", onClick: async (close) => {
           close();
-          const r = await prompt2("Mark " + c.label + " as posted", [{ name: "url", label: c.label + " listing URL (optional — makes taking it down later one tap)", placeholder: "https://..." }], "Save");
+          const r = await askListingUrl(c.label);
           if (!r) return;
-          store.setListing(product.id, marketId, { status: "live", message: "Posted manually on " + c.label, url: r.url || null, listedAt: Date.now() });
-          App.app.rerender();
+          const keep = marketId === "ebay" ? connectors.ebayIds(product.listings.ebay) : {};
+          store.setListing(product.id, marketId, Object.assign(keep, { status: "live", message: "Posted manually on " + c.label, url: r.url, listedAt: Date.now() }));
+          refreshDashboard();
           toast("Marked as posted", c.label + " listing set to live.", "ok");
         } },
         { label: "Close" },
@@ -283,6 +334,7 @@
     const photoGrid = el(".photo-grid");
     const fileInput = el("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: { display: "none" }, onchange: async (e) => { await addPhotos(e.target.files); e.target.value = ""; } });
     async function addPhotos(files) {
+      if (store.saveFailed()) { toast("Storage is full", "Free up space (delete items/photos or download a backup) before adding photos.", "err"); return; }
       for (const f of files) { if (!f.type || !f.type.startsWith("image/")) continue; const raw = await fileToDataURL(f); photos.push(await resizeImage(raw, 1024, 0.72)); }
       drawPhotos();
     }
@@ -303,7 +355,7 @@
       return el(".mkt-target" + (conn.connected ? "" : ".disabled"), [
         el(".mkt-logo", { style: { background: c.color } }, c.short),
         el(".grow", [
-          el(".row", { style: { gap: "8px" } }, [el("span", { style: { fontWeight: "600" } }, c.label), c.hasOfficialApi ? el("span.badge.api", "API") : (c.handoff ? el("span.badge.api", "Manual") : el("span.badge.auto", "Auto"))]),
+          el(".row", { style: { gap: "8px" } }, [el("span", { style: { fontWeight: "600" } }, c.label), c.hasOfficialApi ? el("span.badge.api", "API") : el("span.badge.api", "Manual")]),
           el(".small.muted", conn.connected ? "@" + (conn.handle || "connected") : "Not connected"),
         ]),
         conn.connected ? el("label.switch", [check, el("span.slider")]) : el("a.btn.sm", { href: "#/marketplaces" }, "Connect"),
@@ -319,10 +371,11 @@
       const cur = curSel.value;
       const ms = store.MARKETS.filter((m) => targetState[m] && account.connections[m].connected);
       if (!(price > 0) || !ms.length) { netBox.appendChild(el(".small.muted", "Enter a price to see what you'd keep on each marketplace after fees.")); return; }
+      if (cur !== fees.currency()) { netBox.appendChild(el(".small.muted", "Fees are only calculated for " + fees.currency() + " (your region in Settings).")); return; }
       netBox.appendChild(el(".small.muted", "What you'd keep (" + fees.region() + " fees — edit in Settings)"));
       ms.forEach((m) => {
         const c = connectors.byId(m);
-        const r = fees.calc(m, price, { cost });
+        const r = fees.calc(m, price, { cost: cost !== null && cost >= 0 ? cost : null });
         netBox.appendChild(el(".net-row", [
           el("span.mkt-dot", { style: { background: c.color } }),
           el("span.grow", c.label),
@@ -336,11 +389,15 @@
     curSel.addEventListener("change", drawNet);
     drawNet();
 
-    async function submit(post) {
+    let publishBtn = null, draftBtn = null;
+    const submit = guard(() => [publishBtn, draftBtn], async (post) => {
       const title = titleIn.value.trim();
       const price = Number(priceIn.value);
+      const costRaw = costIn.value.trim();
+      const cost = costRaw === "" ? null : Number(costRaw);
       if (!title) { toast("Title required", "Give your item a title.", "warn"); titleIn.focus(); return; }
       if (!(price > 0)) { toast("Price required", "Set a price greater than 0.", "warn"); priceIn.focus(); return; }
+      if (cost !== null && !(cost >= 0)) { toast("Check the cost", "Cost can't be negative — leave it empty if you don't know it.", "warn"); costIn.focus(); return; }
       const targets = store.MARKETS.filter((m) => targetState[m] && account.connections[m].connected);
       if (post && !targets.length) { toast("No marketplace selected", "Enable a connected marketplace, or save as draft.", "warn"); return; }
 
@@ -353,10 +410,13 @@
       const product = store.addProduct({
         title, brand: brandIn.value.trim(), category: catSel.value, condition: condSel.value,
         size: sizeIn.value.trim(), color: colorIn.value.trim(), description: descIn.value.trim(),
-        price, currency: curSel.value, cost: costIn.value.trim() === "" ? null : Number(costIn.value),
-        photos: photos.slice(), listings,
+        price, currency: curSel.value, cost, photos: photos.slice(), listings,
       });
-      if (!post) { toast("Saved as draft", "Listing saved without posting.", "ok"); go("#/"); return; }
+      if (!post) {
+        if (store.saveFailed()) toast("Draft kept in this tab only", "Storage is full, so it isn't saved yet — see the red banner.", "warn");
+        else toast("Saved as draft", "Listing saved without posting.", "ok");
+        go("#/"); return;
+      }
 
       let publishTargets = targets.slice();
       if (publishTargets.indexOf("ebay") !== -1) {
@@ -364,15 +424,19 @@
         if (!ok) { store.setListing(product.id, "ebay", { status: "skipped", message: "Skipped - item specifics not provided" }); publishTargets = publishTargets.filter((m) => m !== "ebay"); }
       }
       go("#/");
-      if (!publishTargets.length) { App.app.rerender(); toast("Nothing published", "eBay needed item specifics and no other marketplace was selected.", "warn"); return; }
+      if (!publishTargets.length) { refreshDashboard(); toast("Nothing published", "eBay needed item specifics and no other marketplace was selected.", "warn"); return; }
       const { node, promise } = runPublishUI(product, publishTargets);
+      let open = true;
       modal({
         title: "Publishing to " + publishTargets.length + " marketplace" + (publishTargets.length > 1 ? "s" : ""),
         body: el(".stack", [el(".small.muted", "Posting " + title + ". You can close this - it keeps running."), node]),
-        actions: [{ label: "Done", kind: "primary", onClick: (c) => { c(); App.app.rerender(); } }],
+        actions: [{ label: "Done", kind: "primary" }],
+        onClose: () => { open = false; refreshDashboard(); },
       });
-      promise.then((r) => summarize(r, "Publish"));
-    }
+      promise.then((r) => { summarize(r, "Publish"); if (!open) refreshDashboard(); });
+    });
+    publishBtn = el("button.btn.primary.lg.block", { onClick: () => submit(true) }, "🚀 Publish to selected");
+    draftBtn = el("button.btn.ghost.block", { style: { marginTop: "10px" }, onClick: () => submit(false) }, "Save as draft");
 
     root.appendChild(el(".page-head", [el("div", [el("h2", "List a new item"), el("p", "Fill it in once — OmniList pushes it to every marketplace you select.")])]));
     root.appendChild(el(".grid.cols-2", [
@@ -401,12 +465,12 @@
         el(".card", [
           el("div", { style: { fontWeight: "650", marginBottom: "12px" } }, "Post to"),
           el(".stack", targetRows),
-          el(".note.warn", { style: { marginTop: "12px" } }, [el("span.ni", "⚠️"), el("span", "eBay posts via the official API. The others have no public API, so OmniList prepares ready-to-post listings you finish in one tap — no automation.")]),
+          el(".note.warn", { style: { marginTop: "12px" } }, [el("span.ni", "⚠️"), el("span", "OmniList never automates a marketplace. eBay posts through its official API when you run the desktop version with your eBay keys; everywhere else (and eBay on this site) it prepares a ready-to-post listing you finish in one tap.")]),
         ]),
         el(".card", [el("div", { style: { fontWeight: "650", marginBottom: "10px" } }, "Your take"), netBox]),
         el(".card", [
-          el("button.btn.primary.lg.block", { onClick: () => submit(true) }, "🚀 Publish to selected"),
-          el("button.btn.ghost.block", { style: { marginTop: "10px" }, onClick: () => submit(false) }, "Save as draft"),
+          publishBtn,
+          draftBtn,
           el(".hint", { style: { marginTop: "10px" } }, "Re-push or fix individual marketplaces anytime from the listing's Details."),
         ]),
       ]),
@@ -435,7 +499,13 @@
     }
     function showCaptured(src) { App.ui.clear(stage); stage.appendChild(el("img", { src })); }
     function stopCamera() { if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; } }
+    function storageFull() {
+      if (!store.saveFailed()) return false;
+      toast("Storage is full", "Free up space (delete items/photos or download a backup) before adding photos.", "err");
+      return true;
+    }
     async function startCamera() {
+      if (storageFull()) return;
       captured = null;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
@@ -456,6 +526,7 @@
       resizeImage(c.toDataURL("image/jpeg", 0.85), 1024, 0.78).then((small) => { captured = small; stopCamera(); showCaptured(small); setCamButtons("captured"); });
     }
     async function onUpload(file) {
+      if (storageFull()) return;
       const small = await resizeImage(await fileToDataURL(file), 1024, 0.78);
       captured = small; stopCamera(); showCaptured(small); setCamButtons("captured");
     }
@@ -483,21 +554,24 @@
     const shopIn = el("input", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 8 — leave blank to skip the Buy/Pass call" });
     const resultArea = el("div");
     const historyArea = el("div");
+    let appraiseBtn = null;
 
-    function runAppraise() {
+    const runAppraise = guard(() => [appraiseBtn], async () => {
       const query = qIn.value.trim();
       if (!query) { toast("Add a description", "Tell the app what the item is.", "warn"); qIn.focus(); return; }
-      const shopPrice = shopIn.value.trim() === "" ? null : Number(shopIn.value);
+      const shopRaw = shopIn.value.trim();
+      const shopPrice = shopRaw === "" ? null : Number(shopRaw);
+      if (shopPrice !== null && !(shopPrice >= 0)) { toast("Check the shop price", "It can't be negative — leave it empty to skip the Buy/Pass call.", "warn"); shopIn.focus(); return; }
       const input = { query, brand: bIn.value.trim(), category: catSel.value, condition: condSel.value, shopPrice };
       App.ui.clear(resultArea);
-      resultArea.appendChild(el(".card", el(".row", [el(".spinner"), el("div", [el("div", { style: { fontWeight: "600" } }, "Appraising…"), el(".small.muted", "Checking eBay, Depop, Vinted & Google Shopping")])])));
-      App.appraisal.appraise(input).then((result) => {
-        App.ui.clear(resultArea);
-        resultArea.appendChild(renderAppraisalResult(input, result, captured));
-        store.addAppraisal({ query: input.query, brand: input.brand, category: input.category, condition: input.condition, shopPrice, image: captured, result });
-        renderHistory();
-      });
-    }
+      resultArea.appendChild(el(".card", el(".row", [el(".spinner"), el("div", [el("div", { style: { fontWeight: "600" } }, "Appraising…"), el(".small.muted", "Looking for comparable listings")])])));
+      const result = await App.appraisal.appraise(input);
+      App.ui.clear(resultArea);
+      resultArea.appendChild(renderAppraisalResult(input, result, captured));
+      store.addAppraisal({ query: input.query, brand: input.brand, category: input.category, condition: input.condition, shopPrice, image: captured, result });
+      renderHistory();
+    });
+    appraiseBtn = el("button.btn.primary.lg.block", { style: { marginTop: "16px" }, onClick: () => runAppraise() }, "🔎 Appraise value");
 
     function renderHistory() {
       App.ui.clear(historyArea);
@@ -510,18 +584,18 @@
         window.scrollTo({ top: 0, behavior: "smooth" });
       } }, [
         el(".photo-tile", { style: { width: "42px", height: "42px", flex: "none", backgroundImage: a.image ? "url(" + a.image + ")" : "none" } }),
-        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt) + (a.result.verdict ? " · " + a.result.verdict.call : ""))]),
+        el(".c-title", [el("div.t", App.ui.composeTitle(a.brand, a.query)), el("div.s", timeAgo(a.createdAt) + historyTag(a.result))]),
         el("div.c-price", money(a.result.aggregate.median, a.result.currency)),
       ]))));
     }
 
-    root.appendChild(el(".page-head", [el("div", [el("h2", "Scan & appraise"), el("p", "Know what an item is worth — and whether it's worth buying — before you list.")])]));
-    const ebayStatusChip = el("div", { style: { marginBottom: "12px" } }, el("span.small.muted", "Checking eBay connection…"));
+    root.appendChild(el(".page-head", [el("div", [el("h2", "Scan & appraise"), el("p", "Check what similar items are listed for before you buy or list.")])]));
+    const ebayStatusChip = el("div", { style: { marginBottom: "12px" } }, el("span.small.muted", "Checking for live price data…"));
     App.backend.status().then((st) => {
       App.ui.clear(ebayStatusChip);
-      if (st && st.ebay && st.ebay.configured) ebayStatusChip.appendChild(el("span.badge.ok", "🟢 eBay LIVE — " + st.ebay.environment + " (" + st.ebay.marketplace + ")"));
-      else if (st && st.offline) ebayStatusChip.appendChild(el("span.badge", "Estimates mode — live eBay comps need the local server (start.bat)."));
-      else ebayStatusChip.appendChild(el("span.badge.auto", "eBay not configured — estimates. See EBAY_SETUP.md"));
+      if (st && st.ok && st.ebay && st.ebay.configured) ebayStatusChip.appendChild(el("span.badge.ok", "🟢 Live eBay prices — " + st.ebay.environment + " (" + st.ebay.marketplace + ")"));
+      else if (st && st.ok) ebayStatusChip.appendChild(el("span.badge.auto", "Demo mode — add your eBay keys (EBAY_SETUP.md) for live prices."));
+      else ebayStatusChip.appendChild(el("span.badge", "Demo mode — live prices need the desktop version (start.bat) with your eBay keys."));
     });
     root.appendChild(ebayStatusChip);
     root.appendChild(el(".grid.cols-2", [
@@ -534,7 +608,7 @@
           el("label.field", [el("span.lab", "Condition"), condSel]),
           el("label.field", [el("span.lab", "Shop price (" + fees.currency() + ")"), shopIn]),
         ]),
-        el("button.btn.primary.lg.block", { style: { marginTop: "16px" }, onClick: runAppraise }, "🔎 Appraise value"),
+        appraiseBtn,
       ]),
     ]));
     root.appendChild(el("div", { style: { marginTop: "18px" } }, resultArea));
@@ -542,6 +616,10 @@
     renderHistory();
     return root;
   }
+
+  // Older saved appraisals have no mode; they were never live-only, so treat as demo.
+  function isLive(result) { return !!result && result.mode === "live"; }
+  function historyTag(result) { return isLive(result) && result.verdict ? " · " + result.verdict.call : isLive(result) ? "" : " · demo"; }
 
   function renderComps(result) {
     const wrap = el("div");
@@ -555,14 +633,17 @@
         s.live ? el("span.badge.ok", { style: { marginLeft: "6px", padding: "1px 6px" } }, "LIVE") : null,
       ])));
       const src = result.sources.find((s) => s.id === active);
-      src.comps.forEach((cmp) => body.appendChild(el(".comp", [
-        el(".c-title", [el("div.t", cmp.title), el("div.s", cmp.when)]),
-        el("div.c-price", money(cmp.price, result.currency)),
-        el("a.btn.sm.ghost", { href: cmp.url, target: "_blank", rel: "noopener" }, "↗"),
-      ])));
+      src.comps.forEach((cmp) => {
+        const href = safeUrl(cmp.url);
+        body.appendChild(el(".comp", [
+          el(".c-title", [el("div.t", cmp.title), el("div.s", cmp.when)]),
+          el("div.c-price", moneyAuto(cmp.price, result.currency)),
+          href ? el("a.btn.sm.ghost", { href, target: "_blank", rel: "noopener noreferrer" }, "↗") : null,
+        ]));
+      });
       body.appendChild(el(".comp", { style: { background: "var(--bg-2)" } }, [
         el(".c-title", el("div.t", { style: { color: "var(--muted)" } }, src.label + " range")),
-        el("div.c-price", { style: { color: "var(--muted)" } }, money(src.stats.low, result.currency) + " – " + money(src.stats.high, result.currency)),
+        el("div.c-price", { style: { color: "var(--muted)" } }, moneyAuto(src.stats.low, result.currency) + " – " + moneyAuto(src.stats.high, result.currency)),
       ]));
     }
     draw();
@@ -571,16 +652,17 @@
   }
 
   function appraisalBanner(result) {
-    if (result.ebayLive) {
+    if (isLive(result)) {
       return el(".note.info", [el("span.ni", "🟢"), el("span", [
-        el("strong", "eBay is LIVE" + (result.environment ? " (" + result.environment + ")" : "") + ". "),
-        "Real active listings via the Browse API (current asking prices, not sold prices). Depop, Vinted & Google are estimates.",
+        el("strong", "Live eBay data" + (result.marketplace ? " (" + result.marketplace + ")" : "") + ". "),
+        "Every number below comes from " + result.sources[0].stats.count + " current eBay listings — asking prices, not sold prices.",
       ])]);
     }
-    if (result.backendConfigured && result.ebayError) {
-      return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "eBay live request failed — "), "showing estimated eBay. ", el("span.muted", String(result.ebayError))])]);
-    }
-    return el(".note.warn", [el("span.ni", "⚠️"), el("span", [el("strong", "Estimated data. "), "These comps are modelled, not scraped. Connect eBay locally for live comps (see EBAY_SETUP.md). Depop/Vinted/Google have no public APIs."])]);
+    const why = result.backendConfigured && result.ebayError ? [el("br"), el("span.muted", "eBay request failed: " + String(result.ebayError))] : [];
+    return el(".note.warn", [el("span.ni", "⚠️"), el("span", [
+      el("strong", "Demo data — not real prices. "),
+      "These numbers are generated from the words you typed, only to show how the screen works. There's no Buy/Pass call in demo mode. Live eBay prices need the desktop version (start.bat) with your eBay keys.",
+    ].concat(why))]);
   }
 
   function verdictCard(v, result) {
@@ -595,60 +677,80 @@
         el("li", "Return on cost: " + (v.roi == null ? "free find" : Math.round(v.roi * 100) + "%")),
         el("li", "Price confidence: " + result.aggregate.confidence + "%"),
       ]),
-      el(".small.muted.rule", "Rule: BUY when the best marketplace nets ≥ " + moneyAuto(v.min, cur) + " profit, ≥ 50% return and ≥ 50% confidence. MAYBE if it's still profitable. Otherwise PASS. Estimates aren't guarantees."),
+      el(".small.muted.rule", "Rule: BUY when your best connected marketplace nets ≥ " + moneyAuto(v.min, cur) + " profit, ≥ 50% return and ≥ 50% confidence. MAYBE if it's still profitable. Otherwise PASS. Based on asking prices — not a guarantee."),
     ]);
+  }
+  function verdictNote(result, input) {
+    if (!isLive(result)) return null;
+    if (result.verdict) return verdictCard(result.verdict, result);
+    if (result.verdictBlocked === "currency") {
+      return el(".note.warn", [el("span.ni", "💱"), el("span", [el("strong", "No Buy/Pass call: "), "these eBay prices are in " + result.currency + " but your region uses " + result.regionCurrency + ". Change your region in Settings, or remove marketplaceId from ebay.config.json so eBay follows your region."])]);
+    }
+    if (result.verdictBlocked === "no_connected") {
+      return el(".note.warn", [el("span.ni", "🔗"), el("span", [el("strong", "No Buy/Pass call: "), "connect at least one marketplace you sell on (Marketplaces screen)."])]);
+    }
+    if (input.shopPrice == null) return el(".note.info", [el("span.ni", "💡"), el("span", [el("strong", "Want a Buy / Pass call? "), "Enter the shop price and appraise again."])]);
+    return el(".note.warn", [el("span.ni", "ℹ️"), el("span", "Not enough data for a Buy/Pass call.")]);
   }
 
   function recCard(pm, input, result) {
     const cur = result.currency;
-    const m = pm.net != null ? pm : Object.assign({}, pm, fees.calc(pm.id, pm.price, { cost: input.shopPrice })); // older saved appraisals
-    const best = result.verdict && result.verdict.best === pm.id;
-    return el(".rec-card" + (best ? ".rec-best" : ""), [
-      el(".row", [el("span.mkt-dot", { style: { background: pm.color } }), el("strong", pm.label), best ? el("span.badge.ok", { style: { marginLeft: "auto" } }, "Best") : null]),
+    const live = isLive(result);
+    const best = live && result.verdict && result.verdict.best === pm.id;
+    const hasFees = typeof pm.fee === "number" && typeof pm.net === "number";
+    return el(".rec-card" + (best ? ".rec-best" : ""), { style: live && pm.connected === false ? { opacity: "0.6" } : null }, [
+      el(".row", [
+        el("span.mkt-dot", { style: { background: pm.color } }), el("strong", pm.label),
+        best ? el("span.badge.ok", { style: { marginLeft: "auto" } }, "Best")
+          : live && pm.connected === false ? el("span.badge", { style: { marginLeft: "auto" } }, "Not connected") : null,
+      ]),
       el(".price", { style: { margin: "6px 0 4px" } }, money(pm.price, cur)),
-      el(".rec-line", [el("span", "Fees"), el("span", "−" + moneyAuto(m.fee, cur))]),
-      el(".rec-line", [el("span", "You keep"), el("strong", moneyAuto(m.net, cur))]),
-      m.profit != null ? el(".rec-line", [el("span", "Profit"), el("strong", { style: { color: m.profit >= 0 ? "var(--success)" : "var(--danger)" } }, signed(m.profit, cur))]) : null,
+      hasFees ? el(".rec-line", [el("span", "Fees"), el("span", "−" + moneyAuto(pm.fee, cur))]) : null,
+      hasFees ? el(".rec-line", [el("span", "You keep"), el("strong", moneyAuto(pm.net, cur))]) : null,
+      live && typeof pm.profit === "number" ? el(".rec-line", [el("span", "Profit"), el("strong", { style: { color: pm.profit >= 0 ? "var(--success)" : "var(--danger)" } }, signed(pm.profit, cur))]) : null,
       el(".small.muted", { style: { marginTop: "6px" } }, pm.rationale),
     ]);
   }
 
   function renderAppraisalResult(input, result, image) {
     const a = result.aggregate;
+    const live = isLive(result);
     return el(".stack", [
       appraisalBanner(result),
-      result.verdict ? verdictCard(result.verdict, result)
-        : el(".note.info", [el("span.ni", "💡"), el("span", [el("strong", "Want a Buy / Pass call? "), "Enter the shop price and appraise again — you'll get the profit on each marketplace and a 1–100 resale score."])]),
+      verdictNote(result, input),
       el(".card.pad-lg", [
         image ? el(".row", { style: { gap: "16px", alignItems: "center" } }, [
           el(".photo-tile", { style: { width: "84px", height: "84px", flex: "none", backgroundImage: "url(" + image + ")" } }),
-          valueHero(a, result),
-        ]) : valueHero(a, result),
-        el("div", { style: { marginTop: "14px" } }, [
-          el(".row.between.small.muted", [el("span", "Confidence"), el("span", a.confidence + "%")]),
+          valueHero(a, result, live),
+        ]) : valueHero(a, result, live),
+        live && typeof a.confidence === "number" ? el("div", { style: { marginTop: "14px" } }, [
+          el(".row.between.small.muted", [el("span", "Confidence (how tightly the listings agree)"), el("span", a.confidence + "%")]),
           el(".conf-meter", { style: { marginTop: "6px" } }, el(".conf-fill", { style: { width: a.confidence + "%" } })),
-        ]),
+        ]) : null,
         el(".row", { style: { marginTop: "16px", justifyContent: "center" } }, el("button.btn.primary", { onClick: () => createListingFromAppraisal(input, result, image) }, "＋ Create listing from this")),
       ]),
       el("div", [
-        el("h3", { style: { margin: "4px 0 10px" } }, "What you'd make on each marketplace"),
+        el("h3", { style: { margin: "4px 0 10px" } }, live ? "Suggested price on each marketplace" : "Demo: how prices would split per marketplace"),
         el(".grid.cols-3", result.perMarketplace.map((pm) => recCard(pm, input, result))),
       ]),
-      el("div", [el("h3", { style: { margin: "4px 0 10px" } }, "Comparable listings"), renderComps(result)]),
+      el("div", [el("h3", { style: { margin: "4px 0 10px" } }, live ? "Comparable eBay listings" : "Demo listings"), renderComps(result)]),
     ]);
   }
-  function valueHero(a, result) {
+  function valueHero(a, result, live) {
     const cur = result.currency;
     return el(".value-hero", { style: { flex: "1" } }, [
-      el(".est", money(a.median, cur)),
-      el(".range", "Typical range " + money(a.low, cur) + " – " + money(a.high, cur) + "  ·  Quick-sale " + money(a.quickSale, cur)),
+      live ? null : el("span.badge.auto", "DEMO EXAMPLE"),
+      el(".est", moneyAuto(a.median, cur)),
+      el(".range", (live ? "Typical asking price " : "Demo range ") + moneyAuto(a.low, cur) + " – " + moneyAuto(a.high, cur) + "  ·  Quick-sale " + moneyAuto(a.quickSale, cur)),
     ]);
   }
   function createListingFromAppraisal(input, result, image) {
     store.setDraft({
       title: App.ui.composeTitle(input.brand, input.query),
       brand: input.brand || "", category: input.category || "Clothing", condition: input.condition || "Good",
-      price: result.aggregate.median, currency: result.currency, cost: input.shopPrice == null ? null : input.shopPrice,
+      // Never pre-fill a price from demo numbers.
+      price: isLive(result) && result.currency === fees.currency() ? result.aggregate.median : "",
+      currency: fees.currency(), cost: input.shopPrice == null ? null : input.shopPrice,
       photos: image ? [image] : [],
     });
     go("#/new");
@@ -659,12 +761,12 @@
     if (c.id !== "ebay") return null;
     const slot = el("span");
     App.backend.status().then((st) => {
-      if (st && st.ebay && st.ebay.configured) { App.ui.clear(slot); slot.appendChild(el("span.badge.ok", "🟢 Live (" + st.ebay.environment + ")")); }
+      if (st && st.ok && st.ebay && st.ebay.configured) { App.ui.clear(slot); slot.appendChild(el("span.badge.ok", "🟢 Live (" + st.ebay.environment + ")")); }
     });
     return slot;
   }
 
-  // eBay seller OAuth + real-publishing readiness (Phase 2).
+  // eBay seller OAuth + real-publishing readiness.
   function ebaySellerSection(c) {
     if (c.id !== "ebay") return null;
     const box = el("div", { style: { marginTop: "14px", paddingTop: "14px", borderTop: "1px solid var(--border)" } });
@@ -677,19 +779,19 @@
   async function refreshEbaySeller(slot) {
     App.ui.clear(slot);
     const st = await App.backend.status();
-    if (!st || !st.ok || (st.ebay && st.ebay.offline) || st.offline) {
-      slot.appendChild(el(".small.muted", "Open the app via serve.ps1 to enable live publishing.")); return;
+    if (!st || !st.ok) {
+      slot.appendChild(el(".small.muted", "Available in the desktop version (start.bat) with your eBay keys. Here, eBay listings are prepared for you to post yourself.")); return;
     }
     const e = st.ebay || {};
     if (!e.configured) { slot.appendChild(el(".note.warn", [el("span.ni", "⚠️"), el("span", "Add your app keys to ebay.config.json first (see EBAY_SETUP.md).")])); return; }
     if (!e.redirectConfigured) { slot.appendChild(el(".note.warn", [el("span.ni", "⚠️"), el("span", "Add your RuName (redirectUri) to ebay.config.json to enable seller login (see EBAY_SETUP.md).")])); return; }
     if (!e.userAuthorized) {
-      slot.appendChild(el(".small.muted", { style: { marginBottom: "8px" } }, "Connect your eBay seller account to publish real listings (" + e.environment + ")."));
+      slot.appendChild(el(".small.muted", { style: { marginBottom: "8px" } }, "Connect your eBay seller account to publish real listings (" + e.environment + ", " + e.marketplace + ")."));
       slot.appendChild(el("button.btn.sm.primary", { onClick: () => connectEbaySeller(slot) }, "Connect eBay seller account"));
       return;
     }
     slot.appendChild(el(".row.between", [
-      el("span.badge.ok", "✓ Seller connected (" + e.environment + ")"),
+      el("span.badge.ok", "✓ Seller connected (" + e.environment + ", " + e.marketplace + ")"),
       el("button.btn.sm.danger", { onClick: async () => { await App.backend.ebayAuthDisconnect(); refreshEbaySeller(slot); } }, "Disconnect"),
     ]));
     const readiness = el(".small.muted", { style: { marginTop: "8px" } }, "Checking account readiness...");
@@ -710,8 +812,8 @@
   }
   async function createLocationFlow(slot) {
     const r = await prompt2("Create inventory location", [
-      { name: "country", label: "Country code (US, GB, DE, ...)", value: "US" },
-      { name: "postalCode", label: "Postal / ZIP code", placeholder: "e.g., 95125" },
+      { name: "country", label: "Country code (US, GB, DE, ...)", value: fees.region() === "UK" ? "GB" : "DE" },
+      { name: "postalCode", label: "Postal / ZIP code", placeholder: "e.g., 10115" },
       { name: "city", label: "City (optional)", placeholder: "" },
       { name: "state", label: "State / Province (optional)", placeholder: "" },
     ], "Create");
@@ -723,15 +825,15 @@
   }
   async function connectEbaySeller(slot) {
     const u = await App.backend.ebayAuthUrl();
-    if (!u || !u.ok) { App.ui.toast("Can't start eBay login", (u && (u.message || u.error)) || "error", "err"); return; }
-    window.open(u.url, "_blank", "noopener");
+    if (!u || !u.ok || !safeUrl(u.url)) { toast("Can't start eBay login", (u && (u.message || u.error)) || "error", "err"); return; }
+    App.ui.openSafe(u.url);
     const r = await prompt2("Finish eBay connection",
-      [{ name: "redirect", label: "After you sign in and click 'I agree', eBay opens a page. Copy that page's full URL (it contains a code) and paste it here:", type: "textarea" }],
+      [{ name: "redirect", label: "After you sign in and click 'I agree', eBay opens a page. Copy that page's full address from the address bar and paste it here:", type: "textarea" }],
       "Connect");
     if (!r || !r.redirect) return;
     const ex = await App.backend.ebayAuthExchange(r.redirect.trim());
-    if (ex && ex.ok) { App.ui.toast("eBay seller connected", "Live publishing is on.", "ok"); refreshEbaySeller(slot); }
-    else { App.ui.toast("Connection failed", (ex && (ex.message || ex.error)) || "Could not exchange the code.", "err"); }
+    if (ex && ex.ok) { toast("eBay seller connected", "Live publishing is on.", "ok"); refreshEbaySeller(slot); }
+    else { toast("Connection failed", (ex && (ex.message || ex.error)) || "Could not exchange the code.", "err"); }
   }
   function marketplaceCard(c, account) {
     const conn = account.connections[c.id];
@@ -745,10 +847,6 @@
       ]));
     } else {
       actions.appendChild(el("button.btn.sm.primary", { onClick: async () => {
-        if (!c.hasOfficialApi && !c.handoff) {
-          const ok = await confirmDialog("Connect " + c.label + " via automation?", c.label + " has no public API. Live posting uses browser automation, which violates " + c.label + "’s ToS and can get the account banned. Continue (demo)?", "I understand", "danger");
-          if (!ok) return;
-        }
         const r = await prompt2("Connect " + c.label, [{ name: "handle", label: c.label + " username / handle", placeholder: "yourhandle" }], "Connect");
         if (r) { store.setConnection(account.id, c.id, { connected: true, handle: (r.handle || "account").replace(/^@/, ""), since: Date.now() }); toast(c.label + " connected", "Linked to " + account.name, "ok"); App.app.rerender(); }
       } }, "Connect " + c.label));
@@ -758,7 +856,7 @@
       el(".row.between", [
         el(".row", [el(".mkt-logo", { style: { background: c.color, width: "40px", height: "40px" } }, c.short), el("div", [el("div", { style: { fontWeight: "700", fontSize: "16px" } }, c.label), el(".small.muted", c.audience)])]),
         el(".row", { style: { gap: "8px" } }, [
-          c.hasOfficialApi ? el("span.badge.api", "🔌 Official API") : (c.handoff ? el("span.badge.api", "🙌 1-tap manual") : el("span.badge.auto", "⚠ Automation only")),
+          c.hasOfficialApi ? el("span.badge.api", "🔌 Official API") : el("span.badge.api", "🙌 1-tap manual"),
           ebayLiveBadge(c),
         ]),
       ]),
@@ -772,7 +870,7 @@
     const root = el(".view");
     const account = store.activeAccount();
     root.appendChild(el(".page-head", [el("div", [el("h2", "Marketplaces"), el("p", "Connect " + account.name + "’s marketplace accounts. Each profile links independently.")])]));
-    root.appendChild(el(".note.info", { style: { marginBottom: "16px" } }, [el("span.ni", "ℹ️"), el("span", [el("strong", "How linking works. "), "eBay connects through its official API (when running locally). The rest are one-tap handoffs — connecting just tells OmniList you sell there. Fees are editable in Settings."])]));
+    root.appendChild(el(".note.info", { style: { marginBottom: "16px" } }, [el("span.ni", "ℹ️"), el("span", [el("strong", "How linking works. "), "Connecting tells OmniList you sell there. eBay can publish automatically in the desktop version with your eBay keys; everything else is a one-tap handoff. Fees are editable in Settings."])]));
     root.appendChild(el(".grid.cols-3", connectors.list().map((c) => marketplaceCard(c, account))));
     return root;
   }
@@ -816,6 +914,6 @@
 
   window.App.views = {
     newListing, appraise, marketplaces, accounts, cleanup: null,
-    _: { CATEGORIES, CONDITIONS, CURRENCIES, CLOSED, go, selectEl, iconFor, statusLabel, statusColorVar, signed, statusChip, publishOne, pubRow, runPublishUI, summarize, republish, ensureEbayReady, openHandoff },
+    _: { CATEGORIES, CONDITIONS, CURRENCIES, REPUSHABLE, go, selectEl, iconFor, statusLabel, statusColorVar, signed, guard, repushTargets, refreshDashboard, statusChip, pendingListing, publishOne, pubRow, runPublishUI, summarize, republish, ensureEbayReady, openHandoff },
   };
 })();

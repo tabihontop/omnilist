@@ -160,28 +160,118 @@
     state = emptyState();
     save(true);
   }
-  function normalize() {
-    if (!state || !Array.isArray(state.accounts) || !state.accounts.length) { state = emptyState(); return; }
-    state.products = Array.isArray(state.products) ? state.products : [];
-    state.appraisals = Array.isArray(state.appraisals) ? state.appraisals : [];
-    state.settings = Object.assign(defaultSettings(), state.settings || {});
-    state.settings.feeOverrides = Object.assign({ EU: {}, UK: {} }, state.settings.feeOverrides || {});
-    state.accounts.forEach((a) => {
-      a.connections = a.connections || {};
-      MARKETS.forEach((m) => { a.connections[m] = a.connections[m] || { connected: false }; });
+  /* ---------- Validation (used on load and on backup restore) ---------- */
+  const STATUSES = ["draft", "pending", "ready", "live", "error", "skipped", "sold", "needs_delist", "delisted"];
+  const num = (v) => (v === null || v === undefined || v === "" || typeof v === "boolean" || !isFinite(Number(v)) ? null : Number(v));
+  const str = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
+  const isPhoto = (s) => typeof s === "string" && /^data:image\/[a-z+.-]+;base64,/i.test(s);
+
+  function cleanListing(l) {
+    if (!l || typeof l !== "object") return null;
+    const out = Object.assign({}, l, { status: STATUSES.indexOf(l.status) !== -1 ? l.status : "error", message: str(l.message) });
+    const u = App.ui.safeUrl(l.url);
+    if (u) out.url = u; else delete out.url;
+    return out;
+  }
+  function cleanListings(obj) {
+    const out = {};
+    if (obj && typeof obj === "object") MARKETS.forEach((m) => { const l = cleanListing(obj[m]); if (l) out[m] = l; });
+    return out;
+  }
+  function cleanProduct(p, accountIds) {
+    if (!p || typeof p !== "object" || !p.id || !accountIds.has(p.accountId)) return null;
+    const price = num(p.price);
+    if (price === null || price < 0) return null;
+    const cost = num(p.cost);
+    const out = Object.assign({}, p, {
+      id: str(p.id), accountId: str(p.accountId), title: str(p.title).trim() || "Untitled item",
+      brand: str(p.brand), category: str(p.category) || "Other", condition: str(p.condition) || "Good",
+      size: str(p.size), color: str(p.color), description: str(p.description),
+      price, cost: cost !== null && cost >= 0 ? cost : null,
+      currency: /^[A-Z]{3}$/.test(p.currency) ? p.currency : "EUR",
+      photos: Array.isArray(p.photos) ? p.photos.filter(isPhoto) : [],
+      createdAt: num(p.createdAt) || Date.now(),
+      listings: cleanListings(p.listings),
     });
-    state.products.forEach((p) => { p.listings = p.listings || {}; });
+    if (p.refreshedAt != null) out.refreshedAt = num(p.refreshedAt) || undefined;
+    if (!Array.isArray(p.priceHistory)) delete out.priceHistory;
+    if (p.sale) {
+      const s = p.sale;
+      const sp = num(s.price);
+      if (sp === null || sp < 0 || typeof s.market !== "string") delete out.sale;
+      else out.sale = {
+        market: s.market, price: sp, shipping: num(s.shipping) || 0, fee: num(s.fee) || 0,
+        net: num(s.net) !== null ? num(s.net) : sp, cost: num(s.cost), profit: num(s.profit),
+        at: num(s.at) || out.createdAt, prev: cleanListings(s.prev),
+      };
+    }
+    return out;
+  }
+  function cleanAppraisal(a, accountIds) {
+    if (!a || typeof a !== "object" || !accountIds.has(a.accountId)) return null;
+    const r = a.result;
+    if (!r || !r.aggregate || num(r.aggregate.median) === null || !Array.isArray(r.sources) || !r.sources.length || !Array.isArray(r.perMarketplace)) return null;
+    if (r.sources.some((s) => !s || !Array.isArray(s.comps) || !s.stats)) return null;
+    return Object.assign({}, a, {
+      id: str(a.id) || App.ui.uid("apr"), query: str(a.query), brand: str(a.brand),
+      image: isPhoto(a.image) ? a.image : null, createdAt: num(a.createdAt) || Date.now(),
+      shopPrice: num(a.shopPrice) !== null && num(a.shopPrice) >= 0 ? num(a.shopPrice) : null,
+    });
+  }
+  // Coerces state in place and returns how many records had to be dropped.
+  function sanitize() {
+    let dropped = 0;
+    const accs = state.accounts.filter((a) => a && typeof a === "object" && a.id);
+    dropped += state.accounts.length - accs.length;
+    state.accounts = accs.map((a) => Object.assign({}, a, { id: str(a.id), name: str(a.name).trim() || "My Shop", connections: a.connections && typeof a.connections === "object" ? a.connections : {} }));
+    const ids = new Set(state.accounts.map((a) => a.id));
+    const prods = (Array.isArray(state.products) ? state.products : []).map((p) => cleanProduct(p, ids));
+    dropped += prods.filter((p) => !p).length;
+    state.products = prods.filter(Boolean);
+    const aprs = (Array.isArray(state.appraisals) ? state.appraisals : []).map((a) => cleanAppraisal(a, ids));
+    dropped += aprs.filter((a) => !a).length;
+    state.appraisals = aprs.filter(Boolean);
+    return dropped;
+  }
+
+  function normalize() {
+    if (!state || typeof state !== "object" || !Array.isArray(state.accounts) || !state.accounts.length) { state = emptyState(); return 0; }
+    const dropped = sanitize();
+    if (!state.accounts.length) { state = emptyState(); return dropped; }
+    const s = state.settings && typeof state.settings === "object" ? state.settings : {};
+    state.settings = Object.assign(defaultSettings(), s);
+    state.settings.region = state.settings.region === "UK" ? "UK" : "EU";
+    state.settings.staleDays = Math.max(7, Math.min(365, Math.round(num(state.settings.staleDays) || 30)));
+    const fo = s.feeOverrides && typeof s.feeOverrides === "object" ? s.feeOverrides : {};
+    state.settings.feeOverrides = { EU: fo.EU && typeof fo.EU === "object" ? fo.EU : {}, UK: fo.UK && typeof fo.UK === "object" ? fo.UK : {} };
+    state.accounts.forEach((a) => {
+      MARKETS.forEach((m) => { a.connections[m] = a.connections[m] && typeof a.connections[m] === "object" ? a.connections[m] : { connected: false }; });
+    });
+    // A publish that was still running when the tab closed can never finish:
+    // turn it into a retryable error instead of leaving it "Pending" forever.
+    state.products.forEach((p) => {
+      Object.keys(p.listings).forEach((m) => {
+        if (p.listings[m].status === "pending") p.listings[m] = Object.assign({}, p.listings[m], { status: "error", message: "Interrupted - retry" });
+      });
+    });
     if (!state.accounts.find((a) => a.id === state.activeAccountId)) state.activeAccountId = state.accounts[0].id;
     state.version = 2;
+    return dropped;
   }
+
+  // save() never throws. If the browser refuses to store (quota full), the
+  // app keeps working in memory and shows a persistent "not saved" banner.
+  let saveOk = true;
   function save(silent) {
+    let ok = true;
     try { localStorage.setItem(KEY, JSON.stringify(state)); }
-    catch (e) {
-      console.warn("Save failed", e);
-      if (window.App.ui) App.ui.toast("Storage full", "Couldn't save — try fewer/smaller photos, or export a backup and clear old items.", "warn");
-    }
-    if (!silent) emit();
+    catch (e) { ok = false; console.warn("Save failed", e); }
+    const changed = ok !== saveOk;
+    saveOk = ok;
+    if (!ok && changed && window.App.ui) App.ui.toast("Not saved — storage is full", "Recent changes only exist in this tab. Delete photos/items or download a backup.", "err");
+    if (!silent || changed) emit();
   }
+  function saveFailed() { return !saveOk; }
   function emit() { listeners.forEach((fn) => { try { fn(state); } catch (e) { console.error(e); } }); }
   function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 
@@ -301,16 +391,24 @@
   function loadDemo() { const region = state && state.settings ? state.settings.region : "EU"; state = demoState(); state.settings.region = region; save(); }
   function clearAll() { const region = state && state.settings ? state.settings.region : "EU"; state = emptyState(); state.settings.region = region; save(); }
   function exportState() { return JSON.parse(JSON.stringify(state)); }
+  // Restores a backup after validating every record. Returns how many invalid
+  // records were skipped. Throws (leaving current data untouched) if the file
+  // isn't a usable OmniList backup.
   function replaceState(obj) {
-    if (!obj || !Array.isArray(obj.accounts) || !obj.accounts.length || !Array.isArray(obj.products)) throw new Error("That file isn't an OmniList backup.");
-    state = obj; normalize(); save();
+    if (!obj || typeof obj !== "object" || !Array.isArray(obj.accounts) || !obj.accounts.length || !Array.isArray(obj.products)) throw new Error("That file isn't an OmniList backup.");
+    const prev = state;
+    state = JSON.parse(JSON.stringify(obj));
+    const dropped = normalize();
+    if (!state.accounts.some((a) => obj.accounts.some((o) => o && o.id === a.id))) { state = prev; throw new Error("That backup has no valid accounts."); }
+    save();
+    return dropped;
   }
   function getState() { return state; }
 
   load();
 
   window.App.store = {
-    MARKETS, getState, subscribe, save,
+    MARKETS, getState, subscribe, save, saveFailed,
     settings, updateSettings, setFeeOverride, resetFees,
     accounts, activeAccount, setActiveAccount, addAccount, renameAccount, removeAccount, setConnection,
     allProducts, products, getProduct, addProduct, updateProduct, setListing, removeProduct,

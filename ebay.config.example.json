@@ -3,7 +3,8 @@
   "environment": "sandbox",
   "clientId": "YOUR-EBAY-APP-ID-CLIENT-ID",
   "clientSecret": "YOUR-EBAY-CERT-ID-CLIENT-SECRET",
-  "marketplaceId": "EBAY_US",
+  "_marketplaceId_comment": "Optional. Leave empty and eBay follows your region in Settings (EU -> EBAY_DE in EUR, UK -> EBAY_GB in GBP). Set e.g. EBAY_US only if you really sell there; prices then come back in that currency and the Buy/Pass call is turned off unless it matches your region.",
+  "marketplaceId": "",
   "_redirectUri_comment": "Only needed for Phase 2 (real publishing): your RuName from the eBay developer portal (User tokens (OAuth) -> Get a Token -> RuName). Leave as-is if you only want live appraisals.",
   "redirectUri": "YOUR-RUNAME-FOR-SELLER-OAUTH"
 }

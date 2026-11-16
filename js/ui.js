@@ -26,7 +26,6 @@
         const v = attrs[k];
         if (v == null || v === false) continue;
         if (k === "class") node.className += " " + v;
-        else if (k === "html") node.innerHTML = v;
         else if (k === "text") node.textContent = v;
         else if (k === "style" && typeof v === "object") Object.assign(node.style, v);
         else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
@@ -47,7 +46,20 @@
     });
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
-  function frag(children) { const f = document.createDocumentFragment(); appendChildren(f, children); return f; }
+
+  /* ----- Links: only ever store, render or open http(s) URLs ----- */
+  function safeUrl(u) {
+    if (typeof u !== "string" || !u.trim()) return null;
+    try {
+      const url = new URL(u.trim());
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+    } catch (e) { return null; }
+  }
+  function openSafe(u) {
+    const s = safeUrl(u);
+    if (s) window.open(s, "_blank", "noopener");
+    return !!s;
+  }
 
   /* ----- Formatting ----- */
   const CUR = { USD: "$", EUR: "€", GBP: "£" };
@@ -79,9 +91,6 @@
     const h = Math.floor(m / 60); if (h < 24) return h + "h ago";
     const d = Math.floor(h / 24); if (d < 30) return d + "d ago";
     return fmtDate(ts);
-  }
-  function escapeHtml(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
   function slugify(s) {
     return String(s || "item").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "item";
@@ -135,22 +144,34 @@
   }
 
   /* ----- Modal ----- */
+  // Open modals form a stack: Escape closes only the top one.
+  const modalStack = [];
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modalStack.length) { e.preventDefault(); modalStack[modalStack.length - 1](); }
+  });
   function modal(opts) {
     // opts: { title, body(node), actions:[{label, kind, onClick(close)}], onClose }
     const backdrop = el(".modal-backdrop");
-    function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); if (opts.onClose) opts.onClose(); }
-    function onKey(e) { if (e.key === "Escape") close(); }
+    let closed = false;
+    function close() {
+      if (closed) return;
+      closed = true;
+      const i = modalStack.indexOf(close);
+      if (i !== -1) modalStack.splice(i, 1);
+      backdrop.remove();
+      if (opts.onClose) opts.onClose();
+    }
     const foot = el(".m-foot", (opts.actions || [{ label: "Close" }]).map((a) =>
-      el("button.btn" + (a.kind ? "." + a.kind : ""), { onClick: () => a.onClick ? a.onClick(close) : close() }, a.label)
+      el("button.btn" + (a.kind ? "." + a.kind : ""), { type: "button", onClick: () => a.onClick ? a.onClick(close) : close() }, a.label)
     ));
-    const box = el(".modal", [
+    const box = el(".modal", { role: "dialog", "aria-modal": "true", "aria-label": opts.title || "Dialog" }, [
       opts.title ? el(".m-head", opts.title) : null,
       el(".m-body", opts.body),
       foot,
     ]);
     backdrop.appendChild(box);
     backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
-    document.addEventListener("keydown", onKey);
+    modalStack.push(close);
     document.body.appendChild(backdrop);
     return { close };
   }
@@ -175,22 +196,26 @@
       let settled = false;
       const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
       const inputs = {};
+      let m = null;
+      const submit = () => {
+        const out = {}; for (const k in inputs) out[k] = inputs[k].value.trim();
+        finish(out); if (m) m.close();
+      };
       const body = el(".stack", fields.map((f) => {
         const input = el(f.type === "textarea" ? "textarea" : "input", {
           type: f.type || "text", value: f.value || "", placeholder: f.placeholder || "",
         });
+        // Enter submits from single-line fields (textareas keep Enter for new lines).
+        if (f.type !== "textarea") input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
         inputs[f.name] = input;
         return el("label.field", [el("span.lab", f.label), input]);
       }));
       setTimeout(() => { const first = body.querySelector("input,textarea"); if (first) first.focus(); }, 30);
-      modal({
+      m = modal({
         title, body,
         actions: [
           { label: "Cancel", onClick: (c) => { finish(null); c(); } },
-          { label: submitLabel || "Save", kind: "primary", onClick: (c) => {
-            const out = {}; for (const k in inputs) out[k] = inputs[k].value.trim();
-            finish(out); c();
-          } },
+          { label: submitLabel || "Save", kind: "primary", onClick: () => submit() },
         ],
         onClose: () => finish(null),
       });
@@ -228,7 +253,7 @@
   }
 
   window.App.ui = {
-    el, clear, frag, money, money2, moneyAuto, fmtDate, timeAgo, escapeHtml, slugify, uid,
+    el, clear, safeUrl, openSafe, money, money2, moneyAuto, fmtDate, timeAgo, slugify, uid,
     hashString, mulberry32, colorFor, initials, composeTitle,
     toast, modal, confirmDialog, prompt2,
     fileToDataURL, resizeImage,

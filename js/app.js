@@ -26,14 +26,49 @@
   }
   function navigate(path) { location.hash = path; }
 
+  let lastRouteKey = null;
+  function errorScreen(err) {
+    return el(".view", el(".card.pad-lg", el(".empty", [
+      el(".big", "⚠️"),
+      el("h3", "This screen couldn't load"),
+      el("p", "Something in your saved data or the app went wrong. Your data hasn't been changed."),
+      el(".small.muted", { style: { margin: "6px 0 14px", wordBreak: "break-word" } }, String((err && err.message) || err)),
+      el(".row.wrap", { style: { justifyContent: "center", gap: "8px" } }, [
+        el("a.btn.sm.primary", { href: "#/settings" }, "Settings & backup"),
+        el("a.btn.sm", { href: "#/" }, "Dashboard"),
+      ]),
+    ])));
+  }
   function rerender() {
     if (App.views.cleanup) { try { App.views.cleanup(); } catch (e) { /* noop */ } App.views.cleanup = null; }
     const r = currentRoute();
+    let node;
+    try { node = r.render(); }
+    catch (e) { console.error("Render failed:", r.key, e); node = errorScreen(e); }
     clear(viewEl);
-    viewEl.appendChild(r.render());
+    viewEl.appendChild(node);
     titleEl.textContent = r.label;
     Object.keys(navItems).forEach((k) => navItems[k].classList.toggle("active", k === r.key));
-    window.scrollTo(0, 0);
+    // Only jump to the top when the screen changes, not when it refreshes in place.
+    if (r.key !== lastRouteKey) window.scrollTo(0, 0);
+    lastRouteKey = r.key;
+  }
+  // For async flows: refresh only if the user is still on that screen
+  // (never yank them back from, or re-render over, another screen).
+  function refreshIf(key) { if (currentRoute().key === key) rerender(); }
+
+  /* ---------- "not saved" banner (storage full) ---------- */
+  let saveBanner = null;
+  function drawSaveBanner() {
+    if (!saveBanner) return;
+    clear(saveBanner);
+    if (!store.saveFailed()) { saveBanner.style.display = "none"; return; }
+    saveBanner.style.display = "";
+    saveBanner.appendChild(el("span", [el("strong", "Not saved — this browser's storage is full. "), "Changes only exist in this tab until you free space: delete photos or items, or download a backup."]));
+    saveBanner.appendChild(el(".row", { style: { gap: "8px" } }, [
+      el("a.btn.sm", { href: "#/settings" }, "Backup"),
+      el("button.btn.sm", { onClick: () => { store.save(); drawSaveBanner(); } }, "Try again"),
+    ]));
   }
 
   function switchAccount(id) {
@@ -148,7 +183,10 @@
     ]);
 
     viewEl = el("div#view");
-    appRoot.appendChild(el(".shell", [sidebar, el(".main", [topbar, viewEl])]));
+    saveBanner = el(".save-banner", { role: "alert", style: { display: "none" } });
+    appRoot.appendChild(el(".shell", [sidebar, el(".main", [topbar, saveBanner, viewEl])]));
+    store.subscribe(drawSaveBanner);
+    drawSaveBanner();
     renderChrome();
     renderInstall();
   }
@@ -162,5 +200,5 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 
-  window.App.app = { navigate, rerender, renderChrome, switchAccount };
+  window.App.app = { navigate, rerender, refreshIf, renderChrome, switchAccount };
 })();

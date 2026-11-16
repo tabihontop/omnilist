@@ -5,7 +5,7 @@
    The local eBay backend (/api/*) and other sites are never cached.
    Bump CACHE when the list of shell files changes.
    =========================================================================== */
-const CACHE = "omnilist-v2";
+const CACHE = "omnilist-v3";
 const SHELL = [
   "./",
   "index.html",
@@ -33,7 +33,9 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      // Only our own old caches: the site's origin (github.io) is shared with
+      // other projects, and their caches must be left alone.
+      .then((keys) => Promise.all(keys.filter((k) => k.indexOf("omnilist-") === 0 && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -54,7 +56,7 @@ self.addEventListener("fetch", (event) => {
         return res;
       })
       .catch(() =>
-        caches.match(req, { ignoreSearch: true }).then((hit) => hit || (req.mode === "navigate" ? caches.match("index.html") : Response.error()))
+        caches.open(CACHE).then((c) => c.match(req, { ignoreSearch: true }).then((hit) => hit || (req.mode === "navigate" ? c.match("index.html") : Response.error())))
       )
   );
 });

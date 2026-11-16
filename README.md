@@ -33,13 +33,14 @@ Double-click **`index.html`**. Everything works **except** the live camera in *A
 
 | Feature | Where | Notes |
 |---|---|---|
-| **Cross-post one listing to all marketplaces** | New Listing → *Publish to selected* | eBay via API; Vinted/Depop/Facebook/Sellpy as one-tap handoffs. |
+| **Cross-post one listing to all marketplaces** | New Listing → *Publish to selected* | eBay via API in the desktop version (start.bat + your eBay keys, see EBAY_SETUP.md); on the website eBay is a one-tap handoff like Vinted/Depop/Facebook/Sellpy. Nothing is shown as *Live* until it really is. |
+| **Price changes on live listings** | Card / Details → *Update price ↗* | Changing a price never re-posts a live listing; each live marketplace gets an *Update price* reminder (eBay can update automatically in the desktop version). |
 | **See what you'd keep before you list** | New Listing → *Your take* | Net after each marketplace's fee, and profit if you enter a cost. |
 | **Mark sold → take down everywhere else** | Card → *✓ Sold*, or Details | Records the sale; every other live listing goes on a red *Take these down* list with an Open ↗ link and a Done button. *Undo sale* restores everything. |
 | **Profit tracking** | Dashboard stats, Details, *Sales & profit* CSV | Sold price − fees − shipping − cost. Fees are per region (EU/UK) and editable. |
 | **Search, filter, sort, bulk actions** | Dashboard → *Your listings* | Filters: Active, Drafts, Ready to post, Take down, Stale, Sold. *☑ Select* for bulk mark sold, % price change, re-push, delete. |
 | **Stale-listing nudges** | Dashboard (amber panel) | Items unsold for 30+ days (configurable): −10% price, relist, or snooze. |
-| **Buy / Maybe / Pass call** | Appraise → enter *Shop price* | Profit per marketplace after fees, a 1–100 resale score and the rule it used. |
+| **Buy / Maybe / Pass call** | Appraise → enter *Shop price* | Live eBay data only (desktop version with eBay keys). Profit on your *connected* marketplaces after fees, a 1–100 resale score and the rule it used. Without live data the screen is clearly labelled demo and gives no call. The eBay site follows your region (EU → ebay.de, UK → ebay.co.uk). |
 | **Switch seller accounts** | Top-right account chip | Each profile has its own connections + listings. |
 | **Install as an app + offline** | Settings → *Install as an app* | Add to home screen; works offline after the first visit (service worker). |
 | **Backup, restore, CSV export** | Settings → *Your data* | JSON backup/restore (photos included), inventory CSV, sales & profit CSV, load demo, clear all. |

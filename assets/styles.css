@@ -292,10 +292,16 @@ table.tbl tr:hover td { background: var(--bg-2); }
 /* ---------- Modal ---------- */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 200; padding: 20px; animation: fade .15s ease; }
 @keyframes fade { from { opacity: 0; } }
-.modal { background: var(--elevated); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 440px; box-shadow: var(--shadow); }
-.modal .m-head { padding: 16px 18px; border-bottom: 1px solid var(--border); font-weight: 650; font-size: 16px; }
-.modal .m-body { padding: 18px; }
-.modal .m-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+/* The modal never grows past the screen: head + foot stay put, the body scrolls. */
+.modal { background: var(--elevated); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 440px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); }
+.modal .m-head { padding: 16px 18px; border-bottom: 1px solid var(--border); font-weight: 650; font-size: 16px; flex: none; }
+.modal .m-body { padding: 18px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; flex: 1 1 auto; min-height: 0; }
+.modal .m-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; flex: none; }
+
+/* ---------- "Not saved" banner ---------- */
+.save-banner { margin: 12px 24px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(248,113,113,.5); background: rgba(248,113,113,.12);
+  display: flex; align-items: center; gap: 12px; justify-content: space-between; flex-wrap: wrap; font-size: 13px; }
 
 .grow { flex: 1 1 auto; min-width: 0; }
 .acct-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -390,7 +396,18 @@ table.tbl tr:hover td { background: var(--bg-2); }
   .view { padding: 16px; }
   .mobile-only { display: block; }
   .topbar { padding: 0 14px; }
+  .save-banner { margin: 10px 16px 0; }
+  .modal-backdrop { padding: 12px; }
+  .modal { max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); }
+  #toasts { left: 12px; right: 12px; bottom: 80px; }
+  .toast { max-width: none; min-width: 0; }
+  /* iPhone notch / home indicator */
+  .sidebar { padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px)); padding-left: calc(6px + env(safe-area-inset-left, 0px)); padding-right: calc(6px + env(safe-area-inset-right, 0px)); }
+  .main { padding-bottom: calc(66px + env(safe-area-inset-bottom, 0px)); }
+  .bulk-bar { bottom: calc(74px + env(safe-area-inset-bottom, 0px)); }
+  #toasts { bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
 }
+.topbar { padding-top: env(safe-area-inset-top, 0px); height: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); }
 @media (max-width: 520px) {
   .grid.cols-4 { grid-template-columns: 1fr; }
 }

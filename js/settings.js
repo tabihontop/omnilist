@@ -19,9 +19,12 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
+  // Text cells starting with = + - @ (or tab/CR) would run as formulas in
+  // Excel/Sheets, so they get a leading apostrophe. Numbers are left as is.
   function csv(rows) {
     return rows.map((r) => r.map((v) => {
-      const s = v == null ? "" : String(v);
+      let s = v == null ? "" : String(v);
+      if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
       return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     }).join(",")).join("\r\n");
   }
@@ -55,9 +58,12 @@
       try { obj = JSON.parse(r.result); } catch (e) { toast("Couldn't read that file", "It isn't valid JSON.", "err"); return; }
       const n = Array.isArray(obj && obj.products) ? obj.products.length : 0;
       if (!(await confirmDialog("Restore this backup?", "It replaces everything currently in OmniList on this device with the backup (" + n + " items).", "Restore", "danger"))) return;
-      try { store.replaceState(obj); } catch (e) { toast("Couldn't restore", e.message, "err"); return; }
+      let dropped = 0;
+      try { dropped = store.replaceState(obj) || 0; } catch (e) { toast("Couldn't restore", e.message, "err"); return; }
       App.app.renderChrome(); location.hash = "#/"; App.app.rerender();
-      toast("Backup restored", n + " items loaded.", "ok");
+      const loaded = store.allProducts().length;
+      if (dropped) toast("Backup restored with problems", loaded + " items loaded. " + dropped + " damaged record" + (dropped === 1 ? " was" : "s were") + " skipped.", "warn");
+      else toast("Backup restored", loaded + " items loaded.", "ok");
     };
     r.readAsText(file);
   }
@@ -77,6 +83,7 @@
     regionSel.value = r;
     regionSel.addEventListener("change", () => {
       store.updateSettings({ region: regionSel.value });
+      App.backend.resetStatus(); // eBay marketplace follows the region
       toast("Region: " + regionSel.value, "New listings and estimates now use " + fees.currency() + " and " + regionSel.value + " fees.", "ok");
       App.app.rerender();
     });

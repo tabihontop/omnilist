@@ -51,12 +51,16 @@ your secret off the browser, which is required).
   "environment": "sandbox",
   "clientId": "YourApp-OmniList-SBX-abc123-4d5e6f",
   "clientSecret": "SBX-1234567890abcdef1234567890",
-  "marketplaceId": "EBAY_US"
+  "marketplaceId": ""
 }
 ```
 
 - `environment`: `"sandbox"` or `"production"` (must match the keyset you copied).
-- `marketplaceId`: e.g. `EBAY_US`, `EBAY_GB`, `EBAY_DE` (sets currency/region of comps).
+- `marketplaceId` (optional): **leave it empty** and eBay follows your region in
+  **Settings** — EU → `EBAY_DE` (EUR), UK → `EBAY_GB` (GBP). Only set it (e.g. `EBAY_US`)
+  to pin one eBay site. If the pinned site's currency differs from your region's, comps
+  still show but the Buy/Pass call is turned off and publishing refuses the price (it
+  won't mix currencies).
 
 > ⚠️ **Keep `ebay.config.json` private** — it holds your secret. Don't share or commit
 > it. The server refuses to serve it to the browser.
@@ -64,8 +68,8 @@ your secret off the browser, which is required).
 ## Step 4 — Run and verify
 
 1. Launch with **`start.bat`** (or `serve.ps1`). The console should print:
-   `eBay: LIVE (sandbox, EBAY_US)`.
-2. Open the app → **Appraise**. You should see a green **🟢 eBay LIVE** chip.
+   `eBay: LIVE (sandbox, ...)` (the marketplace follows your region unless you pinned one).
+2. Open the app → **Appraise**. You should see a green **🟢 Live eBay prices** chip.
 3. Type an item (e.g., *"Nike Air Max 90"*) → **Appraise value**.
    The **eBay** tab in *Comparable listings* shows a **LIVE** badge with real listings.
 4. **Marketplaces** screen → the eBay card shows **🟢 Live (sandbox)**.
@@ -77,7 +81,8 @@ your secret off the browser, which is required).
 | Symptom | Likely cause / fix |
 |---|---|
 | Console says `eBay: simulated` | `ebay.config.json` missing or `clientId`/`clientSecret` blank. |
-| Appraisal eBay tab still says "demo" | Backend unreachable (opened `index.html` directly?) — launch via `serve.ps1`. |
+| Appraisal still says "Demo data" | Backend unreachable (opened `index.html` directly?) — launch via `serve.ps1`. Demo mode never gives a Buy/Pass call. |
+| `forbidden_origin` | Open the app at the exact address the server printed (e.g. `http://localhost:8080`); other sites/tabs can't call the local API. |
 | `eBay live request failed … 401 / invalid_client` | Wrong keys, or `environment` doesn't match the keyset (sandbox keys with `"production"` or vice-versa). |
 | LIVE badge shows but few/no eBay comps | Expected on **sandbox** (sparse catalog). Switch to **production**. |
 | Production returns `Access denied`/`Insufficient permissions` | Enable/accept the **Buy APIs** agreement for your production keyset in the eBay portal. |
@@ -89,7 +94,9 @@ your secret off the browser, which is required).
 # Phase 2: real cross-*posting* (publish live eBay listings)
 
 This publishes actual eBay listings from **New Listing** (the eBay row goes live for
-real; Depop/Vinted stay simulated). It's wired through the same `serve.ps1` backend:
+real; Depop/Vinted/Facebook/Sellpy are one-tap handoffs you post yourself). Without the
+backend + seller login, eBay is a handoff too — it's never shown as live unless eBay
+returned a listing ID. It's wired through the same `serve.ps1` backend:
 `inventory_item` → `offer` → `publish`, with photos uploaded to eBay Picture Services.
 
 ## Step A — Get a RuName (redirect) and add it to your config
@@ -110,7 +117,7 @@ Seller publishing needs the seller to log in and consent (OAuth), which requires
   "environment": "production",
   "clientId": "…",
   "clientSecret": "…",
-  "marketplaceId": "EBAY_US",
+  "marketplaceId": "",
   "redirectUri": "Your-Name-YourApp-PRD-abc-de"
 }
 ```
@@ -140,8 +147,10 @@ tells you what's missing on the **Marketplaces → eBay** card.
 1. Launch with `start.bat`, open **Marketplaces → eBay**.
 2. Under **Live publishing**, click **Connect eBay seller account**.
 3. A new tab opens eBay's sign-in / consent page → sign in → **I agree**.
-4. eBay redirects you to a page whose URL contains `?code=…`. **Copy that full URL** and
-   paste it back into the app's prompt → **Connect**.
+4. eBay redirects you to a page whose URL contains `?state=…&code=…`. **Copy that full
+   URL** (not just the code) and paste it back into the app's prompt → **Connect**. The
+   `state` part proves the login came from this app; it's single-use and expires after
+   20 minutes — if it's rejected, click **Connect eBay seller account** again.
 5. The card shows **✓ Seller connected** and a readiness check (policies + location).
 
 The seller token is stored locally in `ebay.tokens.json` and auto-refreshes (keep it
@@ -150,8 +159,12 @@ private; the server won't serve it).
 ## Step D — Publish
 
 **New Listing** → add photos + details → **Publish to selected**. The eBay row will show
-**Published LIVE via eBay API (listing …)** with a real, clickable listing link. If
+**Published on eBay (listing …)** with a real, clickable listing link. If
 something's missing, the row shows a specific error and which step failed.
+
+Retrying a failed publish reuses the same SKU/offer, so it never creates a second eBay
+listing. Changing the price of a live listing shows an **Update price** reminder; on
+eBay that button updates the existing offer for you.
 
 > Strongly recommended: do your first publish in **sandbox** (`"environment": "sandbox"`)
 > so you don't post a real listing while testing.
